@@ -174,7 +174,13 @@ export default defineStore("builtinAgent", () => {
     const scope = { agentType: input.agentType, projectId: input.projectId, scriptId: input.scriptId } satisfies BuiltinRunScope;
     const scopeKey = builtinScopeKey(scope);
     const limits = { ...defaultBuiltinRunLimits, ...(input.limits ?? {}) };
-    const fingerprint = builtinFingerprint({ scope, prompt: input.prompt, limits });
+    const request = {
+      scope,
+      prompt: input.prompt,
+      limits,
+      ...(input.thinkLevel === undefined ? {} : { thinkLevel: input.thinkLevel }),
+    };
+    const fingerprint = builtinFingerprint(request);
     let intent = startIntents.get(scopeKey);
     if (!intent || intent.fingerprint !== fingerprint) {
       intent = { fingerprint, idempotencyKey: createBuiltinIdempotencyKey() };
@@ -190,6 +196,7 @@ export default defineStore("builtinAgent", () => {
         prompt: input.prompt,
         idempotencyKey: intent.idempotencyKey,
         limits,
+        ...(input.thinkLevel === undefined ? {} : { thinkLevel: input.thinkLevel }),
       });
       const data = unwrap<BuiltinRunStartResponse>(response);
       if (!data?.run) throw new Error("启动响应缺少运行记录");

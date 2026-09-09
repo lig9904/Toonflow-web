@@ -13,6 +13,7 @@ export const builtinRunStatuses = [
 ] as const;
 export type BuiltinRunStatus = (typeof builtinRunStatuses)[number];
 export type BuiltinControlAction = "pause" | "resume" | "cancel" | "takeover";
+export type BuiltinThinkLevel = 0 | 1 | 2 | 3;
 
 export interface BuiltinRunLimits {
   maxModelCalls: number;
@@ -72,6 +73,7 @@ export interface BuiltinRunScope {
 export interface BuiltinStartInput extends BuiltinRunScope {
   prompt: string;
   limits?: Partial<BuiltinRunLimits>;
+  thinkLevel?: BuiltinThinkLevel;
 }
 
 export interface BuiltinDisplayMessage {

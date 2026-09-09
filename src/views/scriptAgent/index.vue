@@ -36,7 +36,7 @@
               allowContentSegmentCustom></t-chat-message>
             </template>
           </t-chat-list>
-          <BuiltinRunPanel ref="builtinRunPanelRef" agent-type="scriptAgent" :project-id="project?.id" title="剧本内置 Agent" :show-composer="false" />
+          <BuiltinRunPanel ref="builtinRunPanelRef" agent-type="scriptAgent" :project-id="project?.id" :think-level="thinkLevel" title="剧本内置 Agent" :show-composer="false" />
           <t-chat-sender
             class="inputBox"
             :disabled="status === 'pending' || status === 'streaming'"

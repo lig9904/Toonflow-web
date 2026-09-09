@@ -16,6 +16,7 @@
         agent-type="productionAgent"
         :project-id="project?.id"
         :script-id="episodesId"
+        :think-level="thinkLevel"
         title="制作内置 Agent"
         :show-composer="false" />
       <t-chat-list :clear-history="false">

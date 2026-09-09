@@ -71,6 +71,7 @@ import {
   type BuiltinControlAction,
   type BuiltinRunScope,
   type BuiltinRunStatus,
+  type BuiltinThinkLevel,
 } from "@/types/builtinAgent";
 
 const props = defineProps<{
@@ -79,6 +80,7 @@ const props = defineProps<{
   scriptId?: number | string | null;
   title?: string;
   showComposer?: boolean;
+  thinkLevel?: number;
 }>();
 
 const store = builtinAgentStore();
@@ -168,12 +170,14 @@ function selectRun(runId: string) {
 async function start() {
   const value = prompt.value.trim();
   if (!value || starting.value) return;
+  const selectedThinkLevel = [0, 1, 2, 3].includes(props.thinkLevel ?? -1) ? props.thinkLevel as BuiltinThinkLevel : undefined;
   starting.value = true;
   try {
     await store.startRun({
       ...scope.value,
       prompt: value,
       limits: { maxImageGenerations: imageGenerations.value, maxVideoGenerations: videoGenerations.value },
+      ...(selectedThinkLevel === undefined ? {} : { thinkLevel: selectedThinkLevel }),
     });
     prompt.value = "";
   } catch {
