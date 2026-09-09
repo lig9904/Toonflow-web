@@ -56,11 +56,14 @@ import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import promptEditor from "@/components/promptEditor.vue";
 import imageListCacheStore from "@/stores/imageListCache";
+import { createGenerationIntentStore } from "@/utils/generationIntent";
 
 const { project } = storeToRefs(projectStore());
 const episodesId = inject<Ref<number>>("episodesId")!;
 const activeTrackIndex = ref(0);
 const cacheStore = imageListCacheStore();
+const generationIntents = createGenerationIntentStore<{ videoId: number }>();
+const generateVideoPending = ref(false);
 const { getCache, setCache, removeCache, initCacheFromTrackList, warmUpUrls } = cacheStore;
 const { urlMap } = storeToRefs(cacheStore);
 
@@ -301,11 +304,11 @@ function handlePromptBlur() {
 async function genText() {
   const track = currentTrack.value;
   if (track.id == null || track.state === "生成中") return;
-  let info: { id: number; sources: string }[] = [];
+  let info: { id: number; sources: string; fileType?: string }[] = [];
   const currentTrackId = track.id;
   const rawMedias = (track.medias ?? []) as UploadItem[];
   if (modelParmas.value.mode == "text") {
-    info = rawMedias.map(({ id, sources }) => ({ id: id!, sources }));
+    info = rawMedias.map(({ id, sources, fileType }) => ({ id: id!, sources, fileType }));
   } else {
     const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
     const preSliced = frameMode.includes(modelParmas.value.mode)
@@ -313,7 +316,9 @@ async function genText() {
       : modelParmas.value.mode === "singleImage"
         ? rawMedias.slice(0, 1)
         : rawMedias;
-    const filtered = preSliced.filter((item) => typeof item.id === "number" && !isNaN(item.id)).map(({ id, sources }) => ({ id: id!, sources }));
+    const filtered = preSliced
+      .filter((item) => typeof item.id === "number" && !isNaN(item.id))
+      .map(({ id, sources, fileType }) => ({ id: id!, sources, fileType }));
     if (frameMode.includes(modelParmas.value.mode)) info = filtered.slice(0, 2);
     else if (modelParmas.value.mode === "singleImage") info = filtered.slice(0, 1);
     else info = filtered;
@@ -390,44 +395,53 @@ async function generateVideo() {
     body: $t("workbench.generate.generateConfirmBody"),
     onConfirm: async () => {
       dlg.destroy();
+      if (generateVideoPending.value) return;
+      const track = currentTrack.value;
+      const requestData = {
+        projectId: project.value?.id,
+        scriptId: episodesId.value,
+        uploadData:
+          modelParmas.value.mode === "text"
+            ? []
+            : (() => {
+                const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
+                const preSliced = frameMode.includes(modelParmas.value.mode)
+                  ? imageList.value.slice(0, 2)
+                  : modelParmas.value.mode === "singleImage"
+                    ? imageList.value.slice(0, 1)
+                    : imageList.value;
+                const filtered = preSliced
+                  .filter((item) => Boolean(item.src) && typeof item.id === "number" && !isNaN(item.id))
+                  .map(({ id, sources, fileType }) => ({ id, sources, fileType }));
+                if (frameMode.includes(modelParmas.value.mode)) return filtered.slice(0, 2);
+                if (modelParmas.value.mode === "singleImage") return filtered.slice(0, 1);
+                return filtered;
+              })(),
+        prompt: track.prompt,
+        model: modelParmas.value.model,
+        mode: modelParmas.value.mode,
+        resolution: modelParmas.value.resolution,
+        duration: modelParmas.value.duration,
+        audio: modelParmas.value.audio,
+        trackId: track.id,
+      };
+      const scope = `single:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${String(track.id)}`;
+      generateVideoPending.value = true;
       try {
-        const { data } = await axios.post("/production/workbench/generateVideo", {
-          projectId: project.value?.id,
-          scriptId: episodesId.value,
-          uploadData:
-            modelParmas.value.mode === "text"
-              ? []
-              : (() => {
-                  const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
-                  const preSliced = frameMode.includes(modelParmas.value.mode)
-                    ? imageList.value.slice(0, 2)
-                    : modelParmas.value.mode === "singleImage"
-                      ? imageList.value.slice(0, 1)
-                      : imageList.value;
-                  const filtered = preSliced
-                    .filter((item) => Boolean(item.src) && typeof item.id === "number" && !isNaN(item.id))
-                    .map(({ id, sources }) => ({ id, sources }));
-                  if (frameMode.includes(modelParmas.value.mode)) return filtered.slice(0, 2);
-                  if (modelParmas.value.mode === "singleImage") return filtered.slice(0, 1);
-                  return filtered;
-                })(),
-          prompt: currentTrack.value.prompt,
-          model: modelParmas.value.model,
-          mode: modelParmas.value.mode,
-          resolution: modelParmas.value.resolution,
-          duration: modelParmas.value.duration,
-          audio: modelParmas.value.audio,
-          trackId: currentTrack.value.id,
+        const { videoId } = await generationIntents.run(scope, requestData, async (idempotencyKey) => {
+          const { data } = await axios.post("/production/workbench/generateVideo", { ...requestData, idempotencyKey });
+          return { videoId: data.videoId };
         });
         window.$message.success($t("workbench.generate.generateStarted"));
-        currentTrack.value.videoList.push({
-          id: data,
+        track.videoList.push({
+          id: videoId,
           state: "生成中",
           src: "",
         });
       } catch (e) {
         window.$message.error((e as any)?.message ?? "视频发起生成请求失败");
       } finally {
+        generateVideoPending.value = false;
       }
     },
     onCancel: () => dlg.destroy(),

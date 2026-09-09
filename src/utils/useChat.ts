@@ -68,6 +68,7 @@ export interface ChatSocketEvents {
   "content:add": ContentAddEvent;
   "content:update": ContentUpdateEvent;
   error: { code: string; message: string };
+  productionStateChanged: { projectId: number | string; scriptId: number | string; storyboardId?: number | string | null };
 }
 
 export interface UseChatOptions {

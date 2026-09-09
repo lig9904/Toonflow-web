@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 // 动态加载 src/assets/providers 下所有图标
 const iconModules = import.meta.glob<string>("@/assets/providers/*.{webp,png}", {
   eager: true,
@@ -9,7 +11,7 @@ const iconModules = import.meta.glob<string>("@/assets/providers/*.{webp,png}", 
 function icon(id: string): string {
   for (const [key, url] of Object.entries(iconModules)) {
     const filename = key.split("/").pop()?.split(".")[0];
-    if (filename === id) return url;
+    if (filename === id && typeof url === "string") return url;
   }
   return "";
 }

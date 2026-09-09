@@ -21,7 +21,8 @@ import { type GlobalConfigProvider } from "tdesign-vue-next";
 import { useI18n } from "vue-i18n";
 
 const { locale } = useI18n();
-const { baseUrl, isElectron } = storeToRefs(settingStore());
+const settings = settingStore();
+const { baseUrl, isElectron } = storeToRefs(settings);
 import { config } from "md-editor-v3";
 
 const loading = ref(true);
@@ -78,14 +79,19 @@ async function getPort() {
   await nextTick();
   await nextTick();
   await nextTick();
-  try {
-    const res = await fetch("toonflow://getAppUrl");
-    const data = await res.json();
-    if (data?.url) {
-      baseUrl.value = data.url;
-      isElectron.value = true;
+  settings.hydrateWebApiBaseUrl();
+  if (window.location.protocol === "file:" || window.location.protocol === "toonflow:") {
+    try {
+      const res = await fetch("toonflow://getAppUrl");
+      const data = await res.json();
+      if (data?.url) {
+        baseUrl.value = data.url;
+        isElectron.value = true;
+      }
+    } catch (error) {
+      // Browser deployments do not expose the Electron bridge.
     }
-  } catch (error) {}
+  }
 
   loading.value = false;
 

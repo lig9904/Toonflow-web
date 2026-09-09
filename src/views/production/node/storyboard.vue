@@ -33,6 +33,10 @@
                     <t-tag class="frameTypeTag" :style="{ backgroundColor: tagColors[index % tagColors.length] }">
                       S{{ String(index + 1).padStart(2, "0") }}
                     </t-tag>
+                    <div v-if="getStoryboardStateFor(item.id)" class="frameStateTags">
+                      <t-tag size="small" variant="light" theme="primary">{{ reviewStateLabel(getStoryboardStateFor(item.id)?.reviewState) }}</t-tag>
+                      <t-tag v-if="getStoryboardStateFor(item.id)?.locked" size="small" variant="light" theme="warning">锁定</t-tag>
+                    </div>
                   </div>
 
                   <t-image
@@ -60,7 +64,7 @@
                     </div>
                   </t-tooltip>
                   <t-tooltip theme="primary" :content="$t('workbench.production.node.storyboard.editNode')">
-                    <div class="editNode ac" :style="{ transform: `scale(${styleMaxSize})` }" @click.stop="editInfo(item)">
+                    <div class="editNode ac" :style="{ transform: `scale(${styleMaxSize})` }" @click.stop="openEditInfo(item)">
                       <i-edit theme="outline" size="18" fill="#fff" />
                     </div>
                   </t-tooltip>
@@ -127,8 +131,21 @@ import axios from "@/utils/axios";
 import type { AssetItem, Storyboard } from "../utils/flowBuilder";
 import projectStore from "@/stores/project";
 import productionAgentStore from "@/stores/productionAgent";
+import {
+  editStoryboardInfo,
+  getProductionStateErrorMessage,
+  getProductionStateErrorStatus,
+  getStoryboardState,
+  setStoryboardLock,
+  setStoryboardReviewState,
+  updateStoryboardUrl,
+  type StoryboardReviewState,
+  type StoryboardState,
+  type StoryboardStateResponse,
+} from "@/utils/productionState";
 const { project } = storeToRefs(projectStore());
-const { episodesId } = storeToRefs(productionAgentStore());
+const productionAgent = productionAgentStore();
+const { episodesId } = storeToRefs(productionAgent);
 
 const props = defineProps<{
   id: string;
@@ -169,15 +186,31 @@ function handleDeleteSelected() {
           dialog.destroy();
           return window.$message.error($t("workbench.production.node.storyboard.pleaseSelectImage"));
         }
-        axios.post("/production/storyboard/batchDelete", {
+        const selectedItems = selectedIds.value.map((id) => storyboard.value.find((storyboardItem) => storyboardItem.id === id));
+        const writable = await Promise.all(selectedItems.map((item) => (item ? ensureStoryboardWritable(item) : false)));
+        if (writable.some((value) => !value)) {
+          dialog.destroy();
+          return;
+        }
+        const expectedVersions = Object.fromEntries(
+          selectedItems.map((item) => [item!.id!, getStoryboardStateFor(item!.id)?.version]).filter(([, version]) => version != null),
+        );
+        if (Object.keys(expectedVersions).length !== selectedIds.value.length) {
+          dialog.destroy();
+          return window.$message.warning("分镜状态尚未读取，暂不能删除");
+        }
+        await axios.post("/production/storyboard/batchDelete", {
           ids: selectedIds.value,
           projectId: project.value?.id,
+          expectedVersions,
         });
         storyboard.value = storyboard.value.filter((i) => !selectedIds.value.includes(i.id!));
         selectedIds.value = [];
         window.$message.success($t("workbench.production.node.storyboard.deleteSuccess"));
       } catch (e) {
-        window.$message.error((e as any)?.message || $t("workbench.production.node.storyboard.removeFailed"));
+        const status = getProductionStateErrorStatus(e);
+        if (status === 409 || status === 423 || status === 403) window.$message.warning("分镜状态已变化或被锁定，请重新载入后再操作");
+        else window.$message.error(getProductionStateErrorMessage(e, $t("workbench.production.node.storyboard.removeFailed")));
       } finally {
         dialog.destroy();
       }
@@ -253,16 +286,72 @@ const currentRowStoryboardInfo = ref<{ id: number | null; insertAfterIndex: numb
   id: null,
   insertAfterIndex: null,
 });
+const imageEditExpectedVersion = ref<number>();
 const styleMaxSize = computed(() => {
   if (gridScale.value <= 1) return gridScale.value;
   else 1;
 });
 const generateLoading = ref(false);
+const stateById = reactive<Record<number, StoryboardState | undefined>>({});
+
+function getStoryboardStateFor(id: number | undefined): StoryboardState | undefined {
+  return id == null ? undefined : stateById[id];
+}
+
+function applyStoryboardState(item: Storyboard | undefined, response: StoryboardStateResponse) {
+  if (!item || item.id == null) return;
+  stateById[item.id] = response.state;
+  Object.assign(item, response.storyboard, {
+    collaboration: response.state,
+    version: response.state.version,
+    reviewState: response.state.reviewState,
+    locked: response.state.locked,
+    lockedBy: response.state.lockedBy,
+    updatedBy: response.state.updatedBy,
+    updatedAt: response.state.updatedAt,
+  });
+}
+
+async function loadStoryboardState(item: Storyboard): Promise<StoryboardStateResponse | undefined> {
+  if (item.id == null || project.value?.id == null) return undefined;
+  try {
+    const response = await getStoryboardState(project.value.id, item.id);
+    applyStoryboardState(item, response);
+    return response;
+  } catch (error) {
+    window.$message.error(getProductionStateErrorMessage(error, "无法读取分镜状态，已禁用写入"));
+    return undefined;
+  }
+}
+
+async function ensureStoryboardWritable(item: Storyboard): Promise<boolean> {
+  const state = getStoryboardStateFor(item.id) ?? (await loadStoryboardState(item))?.state;
+  if (!state) {
+    window.$message.warning("分镜状态尚未读取，暂不能写入");
+    return false;
+  }
+  if (state.locked) {
+    window.$message.warning("分镜已锁定，暂不能写入");
+    return false;
+  }
+  return true;
+}
+
+function reviewStateLabel(value: StoryboardReviewState | undefined): string {
+  return { draft: "草稿", pending: "待审核", approved: "已通过", revision: "需修改" }[value ?? "draft"];
+}
 async function batchGenerateImage() {
   if (!selectedIds.value.length) return window.$message.warning("请先选择分镜面板");
+  const writable = await Promise.all(
+    selectedIds.value.map((id) => {
+      const item = storyboard.value.find((storyboardItem) => storyboardItem.id === id);
+      return item ? ensureStoryboardWritable(item) : false;
+    }),
+  );
+  if (writable.some((value) => !value)) return;
   generateLoading.value = true;
   try {
-    await productionAgentStore().batchGenerateStoryboard(selectedIds.value, true);
+    await productionAgent.batchGenerateStoryboard(selectedIds.value, true);
     window.$message.success($t("workbench.production.node.storyboard.batchGenerateSuccess"));
     selectedIds.value = [];
   } catch (e) {
@@ -271,7 +360,18 @@ async function batchGenerateImage() {
     generateLoading.value = false;
   }
 }
-function editStoryboaryImage(item: Storyboard, images: string[], insertAfterIndex: number | null = null) {
+async function editStoryboaryImage(item: Storyboard, images: string[], insertAfterIndex: number | null = null) {
+  if (insertAfterIndex == null) {
+    const state = (await loadStoryboardState(item))?.state;
+    if (!state || state.locked) {
+      if (state?.locked) window.$message.warning("分镜已锁定，暂不能编辑");
+      return;
+    }
+    imageEditExpectedVersion.value = state.version;
+    if (item.id != null) productionAgent.setStoryboardEditing(item.id, true);
+  } else {
+    imageEditExpectedVersion.value = undefined;
+  }
   currentRowStoryboardInfo.value = {
     id: insertAfterIndex == null ? item?.id! : null,
     insertAfterIndex,
@@ -342,24 +442,61 @@ async function save({ imageUrl, flowId }: { imageUrl: string; flowId: number }) 
       flowId,
     });
 
-    storyboard.value.splice(insertAfterIndex + 1, 0, { ...newFrame, id: data.id!, flowId });
-    productionAgentStore().setFlowData();
+    const collaboration = data.collaboration as Storyboard["collaboration"] | undefined;
+    storyboard.value.splice(insertAfterIndex + 1, 0, {
+      ...newFrame,
+      id: data.id!,
+      flowId,
+      collaboration,
+      version: collaboration?.version,
+      reviewState: collaboration?.reviewState,
+      locked: collaboration?.locked,
+      lockedBy: collaboration?.lockedBy,
+      updatedBy: collaboration?.updatedBy,
+      updatedAt: collaboration?.updatedAt,
+    });
+    productionAgent.setFlowData();
     return;
   }
 
   // 更新模式：更新对应分镜的 src
   const target = storyboard.value.find((s) => s.id === id);
-  if (target) {
-    target.src = imageUrl;
-    target.state = "已完成";
-    target.flowId = flowId;
+  const expectedVersion = imageEditExpectedVersion.value;
+  const state = target ? getStoryboardStateFor(target.id) : undefined;
+  if (!target || expectedVersion == null || !state) {
+    window.$message.warning("分镜状态尚未读取，暂不能保存");
+    return;
   }
-  await axios.post("/production/storyboard/updateStoryboardUrl", {
-    id: id,
-    url: imageUrl,
-    flowId,
-  });
+  if (state.locked) {
+    window.$message.warning("分镜已锁定，暂不能保存");
+    return;
+  }
+  try {
+    const response = await updateStoryboardUrl(project.value!.id, id!, expectedVersion, imageUrl, flowId);
+    if (response) applyStoryboardState(target, response);
+    else {
+      target.src = imageUrl;
+      target.state = "已完成";
+      target.flowId = flowId;
+    }
+    await loadStoryboardState(target);
+    visible.value = false;
+  } catch (error) {
+    const status = getProductionStateErrorStatus(error);
+    window.$message.error(
+      status === 409 || status === 423 || status === 403
+        ? "分镜状态已变化或被锁定，请重新载入后再保存"
+        : getProductionStateErrorMessage(error, "分镜图片保存失败"),
+    );
+  }
 }
+
+watch(visible, (isVisible) => {
+  if (!isVisible && currentRowStoryboardInfo.value.id != null) {
+    productionAgent.setStoryboardEditing(currentRowStoryboardInfo.value.id, false);
+  }
+  if (!isVisible) imageEditExpectedVersion.value = undefined;
+});
 
 async function removeFn(id: number) {
   const dialog = DialogPlugin.confirm({
@@ -378,16 +515,29 @@ async function removeFn(id: number) {
         return;
       }
       try {
+        const target = storyboard.value.find((s) => s.id === id);
+        if (!target || !(await ensureStoryboardWritable(target))) {
+          dialog.destroy();
+          return;
+        }
+        const expectedVersion = getStoryboardStateFor(target.id)?.version;
+        if (expectedVersion == null) {
+          dialog.destroy();
+          return window.$message.warning("分镜状态尚未读取，暂不能删除");
+        }
         await axios.post("/production/storyboard/removeFrame", {
           id,
           projectId: project.value?.id,
+          expectedVersion,
         });
         const index = storyboard.value.findIndex((s) => s.id === id);
         if (index !== -1) {
           storyboard.value.splice(index, 1);
         }
       } catch (e) {
-        window.$message.error((e as any)?.message || $t("workbench.production.node.storyboard.removeFailed"));
+        const status = getProductionStateErrorStatus(e);
+        if (status === 409 || status === 423 || status === 403) window.$message.warning("分镜状态已变化或被锁定，请重新载入后再操作");
+        else window.$message.error(getProductionStateErrorMessage(e, $t("workbench.production.node.storyboard.removeFailed")));
       } finally {
         dialog.destroy();
       }
@@ -395,18 +545,111 @@ async function removeFn(id: number) {
   });
 }
 
-function editInfo(item: Storyboard) {
+async function editInfo(item: Storyboard) {
+  if (item.id == null || project.value?.id == null) return;
+  productionAgent.setStoryboardEditing(item.id, true);
+  const loaded = await loadStoryboardState(item);
+  if (!loaded) {
+    productionAgent.setStoryboardEditing(item.id, false);
+    return;
+  }
+
   const formData = reactive({
-    prompt: item.prompt ?? "",
-    videoDesc: item?.videoDesc ?? "",
+    prompt: loaded.storyboard.prompt ?? "",
+    videoDesc: loaded.storyboard.videoDesc ?? "",
   });
+  const editState = ref(loaded.state);
+  const expectedVersion = ref(loaded.state.version);
+  const operationLoading = ref(false);
+  const operationError = ref("");
+
+  const refreshDialogBody = () =>
+    confirmDialog.update({
+      body: bodyVNode,
+      confirmBtn: { disabled: editState.value.locked || operationLoading.value },
+    });
+  const setOperationError = (message: string) => {
+    operationError.value = message;
+    refreshDialogBody();
+  };
+  const applyResponse = (response: StoryboardStateResponse) => {
+    applyStoryboardState(item, response);
+    editState.value = response.state;
+    expectedVersion.value = response.state.version;
+  };
+
+  const reloadBaseline = async () => {
+    operationLoading.value = true;
+    try {
+      const response = await loadStoryboardState(item);
+      if (!response) return;
+      formData.prompt = response.storyboard.prompt ?? "";
+      formData.videoDesc = response.storyboard.videoDesc ?? "";
+      editState.value = response.state;
+      expectedVersion.value = response.state.version;
+      operationError.value = "";
+      refreshDialogBody();
+    } finally {
+      operationLoading.value = false;
+      refreshDialogBody();
+    }
+  };
+
+  const changeReviewState = async (reviewState: StoryboardReviewState) => {
+    if (editState.value.locked || operationLoading.value) return;
+    operationLoading.value = true;
+    try {
+      applyResponse(await setStoryboardReviewState(project.value!.id, item.id!, expectedVersion.value, reviewState));
+      operationError.value = "";
+      refreshDialogBody();
+    } catch (error) {
+      const status = getProductionStateErrorStatus(error);
+      if (status === 409 || status === 423 || status === 403) setOperationError("审核状态已变化或当前无权限，请重新载入");
+      else window.$message.error(getProductionStateErrorMessage(error, "审核状态更新失败"));
+    } finally {
+      operationLoading.value = false;
+      refreshDialogBody();
+    }
+  };
+
+  const changeLock = async (locked: boolean) => {
+    if (operationLoading.value) return;
+    operationLoading.value = true;
+    try {
+      applyResponse(await setStoryboardLock(project.value!.id, item.id!, expectedVersion.value, locked));
+      operationError.value = "";
+      refreshDialogBody();
+    } catch (error) {
+      const status = getProductionStateErrorStatus(error);
+      if (status === 409 || status === 423 || status === 403) setOperationError("锁状态已变化或当前无权限，请重新载入");
+      else window.$message.error(getProductionStateErrorMessage(error, "锁状态更新失败"));
+    } finally {
+      operationLoading.value = false;
+      refreshDialogBody();
+    }
+  };
 
   const bodyVNode = () =>
-    h("div", { class: "editInfoForm" }, [
+    h("div", { class: "storyboardEditInfoForm" }, [
+      h("div", { class: "editInfoStateBar" }, [
+        h(resolveComponent("t-tag"), { theme: editState.value.locked ? "warning" : "primary", variant: "light" }, () =>
+          editState.value.locked ? "已锁定" : `${reviewStateLabel(editState.value.reviewState)} · v${editState.value.version}`,
+        ),
+        h(resolveComponent("t-button"), {
+          size: "small",
+          variant: "text",
+          loading: operationLoading.value,
+          onClick: reloadBaseline,
+        }, () => "重新载入"),
+      ]),
+      operationError.value
+        ? h("div", { class: "editInfoConflict" }, operationError.value)
+        : null,
       h("div", { class: "editInfoField" }, [
         h("label", { class: "editInfoLabel" }, $t("workbench.production.node.storyboard.prompt")),
         h(resolveComponent("t-textarea"), {
           value: formData.prompt,
+          disabled: editState.value.locked || operationLoading.value,
           placeholder: $t("workbench.production.node.storyboard.promptPlaceholder"),
           autosize: { minRows: 3, maxRows: 6 },
           "onUpdate:value": (v: string) => (formData.prompt = v),
@@ -416,40 +659,64 @@ function editInfo(item: Storyboard) {
         h("label", { class: "editInfoLabel" }, $t("workbench.production.node.storyboard.videoDesc")),
         h(resolveComponent("t-textarea"), {
           value: formData.videoDesc,
+          disabled: editState.value.locked || operationLoading.value,
           placeholder: $t("workbench.production.node.storyboard.videoDescPlaceholder"),
           autosize: { minRows: 3, maxRows: 6 },
           "onUpdate:value": (v: string) => (formData.videoDesc = v),
         }),
+      ]),
+      h("div", { class: "editInfoActions" }, [
+        h(resolveComponent("t-button"), { size: "small", variant: "outline", disabled: editState.value.locked || operationLoading.value, onClick: () => changeReviewState("pending") }, () => "提交审核"),
+        h(resolveComponent("t-button"), { size: "small", variant: "outline", disabled: editState.value.locked || operationLoading.value, onClick: () => changeReviewState("approved") }, () => "通过"),
+        h(resolveComponent("t-button"), { size: "small", variant: "outline", disabled: editState.value.locked || operationLoading.value, onClick: () => changeReviewState("revision") }, () => "退回修改"),
+        h(resolveComponent("t-button"), { size: "small", variant: "outline", loading: operationLoading.value, onClick: () => changeLock(!editState.value.locked) }, () =>
+          editState.value.locked ? "解锁" : "锁定",
+        ),
       ]),
     ]);
 
   const confirmDialog = DialogPlugin.confirm({
     header: $t("workbench.production.node.storyboard.editInfo"),
     body: bodyVNode,
-    width: 480,
+    width: 520,
     confirmBtn: {
       content: $t("common.submit"),
       theme: "primary",
       loading: false,
+      disabled: editState.value.locked,
     },
     onConfirm: async () => {
+      if (editState.value.locked) return;
+      let shouldClose = false;
       confirmDialog.update({ confirmBtn: { content: $t("common.submitting"), loading: true } });
       try {
-        await axios.post("/production/storyboard/editStoryboardInfo", {
-          id: item.id,
-          prompt: formData.prompt,
-          videoDesc: formData.videoDesc,
-        });
-        item.prompt = formData.prompt;
-        item.videoDesc = formData.videoDesc;
+        const response = await editStoryboardInfo(project.value!.id, item.id!, expectedVersion.value, formData.prompt, formData.videoDesc);
+        applyResponse(response);
+        operationError.value = "";
+        productionAgent.setStoryboardEditing(item.id!, false);
         window.$message.success($t("common.editSuccess"));
-      } catch (e) {
-        window.$message.error((e as any)?.message || $t("common.editFailed"));
+        shouldClose = true;
+      } catch (error) {
+        const status = getProductionStateErrorStatus(error);
+        if (status === 409 || status === 423 || status === 403) {
+          setOperationError(status === 423 ? "分镜已锁定，请重新载入" : "分镜内容已变化或当前无权限，请重新载入");
+        } else {
+          window.$message.error(getProductionStateErrorMessage(error, $t("common.editFailed")));
+        }
       } finally {
-        confirmDialog.update({ confirmBtn: { content: $t("common.submit"), loading: false } });
-        confirmDialog.destroy();
+        confirmDialog.update({ confirmBtn: { content: $t("common.submit"), loading: false, disabled: editState.value.locked } });
+        refreshDialogBody();
+        if (shouldClose) confirmDialog.destroy();
       }
     },
+    onCancel: () => productionAgent.setStoryboardEditing(item.id!, false),
+    onClose: () => productionAgent.setStoryboardEditing(item.id!, false),
+  });
+}
+
+function openEditInfo(item: Storyboard) {
+  void editInfo(item).catch((error) => {
+    window.$message.error(getProductionStateErrorMessage(error, "打开分镜编辑失败"));
   });
 }
 </script>
@@ -628,6 +895,12 @@ function editInfo(item: Storyboard) {
     border-radius: 3px;
   }
 
+  .frameStateTags {
+    display: flex;
+    gap: 3px;
+    margin-top: 3px;
+  }
+
   .frameTag {
     position: absolute;
     right: 8px;
@@ -661,21 +934,57 @@ function editInfo(item: Storyboard) {
 :deep(.t-image__wrapper) {
   background-color: transparent !important;
 }
-.editInfoForm {
+</style>
+
+<style lang="scss">
+.storyboardEditInfoForm {
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 4px 0;
-}
+  .editInfoStateBar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
 
-.editInfoField {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
+  .editInfoActions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
 
-.editInfoLabel {
-  font-size: 13px;
-  color: var(--td-text-color-secondary);
+  .editInfoField {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .editInfoLabel {
+    font-size: 13px;
+    color: var(--td-text-color-secondary);
+  }
+
+  .editInfoField .t-textarea,
+  .editInfoField .t-textarea__inner {
+    width: 100%;
+    box-sizing: border-box;
+    border-radius: 6px;
+  }
+
+  .editInfoField .t-textarea__inner {
+    padding: 8px 10px;
+  }
+
+  .editInfoConflict {
+    padding: 6px 8px;
+    color: var(--td-error-color-7);
+    background: var(--td-error-color-1);
+    border-radius: 4px;
+    font-size: 12px;
+  }
 }
 </style>

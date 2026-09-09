@@ -1,4 +1,15 @@
 import settingStore from "@/stores/setting";
+import { computed, ref } from "vue";
+import { usePreferredDark } from "@vueuse/core";
+
+export type ThemeMode = "auto" | "light" | "dark";
+const systemDark = ref(typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+
+/** Resolve the persisted UI mode to the concrete theme expected by markdown editors. */
+export const resolveThemeMode = (mode: ThemeMode): "light" | "dark" => {
+  if (mode !== "auto") return mode;
+  return systemDark.value ? "dark" : "light";
+};
 
 // HEX 转 HSL
 const hexToHsl = (hex: string) => {
@@ -59,7 +70,7 @@ const generateColorPalette = (hex: string) => {
 
 // 应用主题模式
 export const applyThemeMode = (mode: string) => {
-  const targetMode = mode === "auto" ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : mode;
+  const targetMode = resolveThemeMode(mode as ThemeMode);
 
   // 方式 1：使用 theme-mode 属性
   if (targetMode === "dark") {
@@ -125,6 +136,7 @@ export const initTheme = () => {
 
   // 监听系统主题变化
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
+    systemDark.value = e.matches;
     if (themeSetting.value.mode === "auto") {
       toggleThemeWithTransition(undefined, () => {
         const targetMode = e.matches ? "dark" : "light";
@@ -146,8 +158,14 @@ export const initTheme = () => {
 // 导出 composable 供组件使用
 export const useTheme = () => {
   const { themeSetting } = storeToRefs(settingStore());
+  const preferredDark = usePreferredDark();
+  const resolvedTheme = computed(() => {
+    if (themeSetting.value.mode !== "auto") return themeSetting.value.mode;
+    return preferredDark.value ? "dark" : "light";
+  });
   return {
     themeSetting,
+    resolvedTheme,
     applyThemeMode,
     applyThemeColor,
     toggleThemeWithTransition,

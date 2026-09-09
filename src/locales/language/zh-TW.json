@@ -64,7 +64,7 @@
       "fileManagement": "檔案管理",
       "otherConfig": "其他設定",
       "requestConfig": "請求網址",
-      "about": "檢查更新",
+      "about": "關於與版本",
       "logoutConfig": "登出",
       "skillsSkillsManagement": "Skills技能管理"
     },
@@ -269,7 +269,8 @@
         "enterUsername": "請輸入使用者名稱",
         "usernameLength": "使用者名稱長度為 2-20 個字元",
         "enterPassword": "請輸入密碼",
-        "passwordLength": "密碼長度為 6-20 個字元",
+        "passwordLength": "密碼長度為 8-128 個字元",
+        "passwordNotAllowed": "不可使用預設密碼 admin123，請設定新密碼",
         "fetchFailed": "取得使用者資訊失敗",
         "saveSuccess": "儲存成功",
         "saveFailed": "儲存失敗"
@@ -357,6 +358,13 @@
     },
     "about": {
       "slogan": "開源的 AI 驅動漫畫 / 分鏡創作工具",
+      "customEdition": "ToonFlow 客製版",
+      "updateTitle": "更新說明",
+      "adminDeploymentNotice": "更新由管理員統一部署。如需升級，請聯絡管理員。",
+      "backendFork": "後端程式碼儲存庫",
+      "frontendFork": "前端程式碼儲存庫",
+      "upstreamTitle": "上游專案與授權",
+      "upstreamProject": "上游專案",
       "latestVersion": "目前為最新版本",
       "checkUpdate": "檢查更新",
       "codeRepository": "程式碼儲存庫",

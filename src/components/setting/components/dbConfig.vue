@@ -1,5 +1,6 @@
 <template>
   <div class="dbConfig">
+    <t-alert theme="info" style="margin-bottom: 16px">PostgreSQL 的整库恢复与清空通过数据库维护流程执行。这里保留表概览和数据导出。</t-alert>
     <!-- 数据库概览 -->
     <t-card class="actionItem">
       <div class="actionInfo">
@@ -34,7 +35,7 @@
         <h4>{{ $t("settings.db.importDb") }}</h4>
         <p>{{ $t("settings.db.importDbDesc") }}</p>
       </div>
-      <t-button theme="warning" variant="outline" @click="triggerImport">
+      <t-button theme="warning" variant="outline" disabled @click="triggerImport">
         <template #icon>
           <i-upload theme="outline" size="14" fill="currentColor" />
         </template>
@@ -66,7 +67,7 @@
         <h4>{{ $t("settings.db.clearDb") }}</h4>
         <p>{{ $t("settings.db.clearDbDesc") }}</p>
       </div>
-      <t-button theme="danger" variant="outline" @click="deleteAllData">
+      <t-button theme="danger" variant="outline" disabled @click="deleteAllData">
         <template #icon>
           <i-clear theme="outline" size="14" fill="currentColor" />
         </template>
@@ -254,7 +255,7 @@ async function clearTable() {
       confirmDlg.hide();
       LoadingPlugin(true);
       try {
-        await axios.post("/setting/dbConfig/clearTable", { tableName: selectedTable.value });
+        await axios.post("/setting/dbConfig/clearTable", { tableName: selectedTable.value, confirm: "CLEAR_TABLE" });
         window.$message.success($t("settings.db.msg.clearTableSuccess"));
         selectedTable.value = "";
         // 刷新表信息

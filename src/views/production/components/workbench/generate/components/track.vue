@@ -75,8 +75,11 @@ import projectStore from "@/stores/project";
 import imageListCacheStore from "@/stores/imageListCache";
 import JSZip from "jszip";
 import settingStore from "@/stores/setting";
+import { createGenerationIntentStore, shouldRetainGenerationIntent } from "@/utils/generationIntent";
 
 const { otherSetting } = storeToRefs(settingStore());
+const generationIntents = createGenerationIntentStore();
+const batchRequestIntents = createGenerationIntentStore<Array<{ videoId: number; trackId: number; jobId?: string; reused?: boolean }>>();
 const { project } = storeToRefs(projectStore());
 const { removeCache } = imageListCacheStore();
 const episodesId = inject<Ref<number>>("episodesId")!;
@@ -249,7 +252,7 @@ function batchGenText() {
     const trackId = track.id;
     let info = [];
     if (props.modelParmas.mode == "text") {
-      info = track?.medias.map(({ id, sources }) => ({ id, sources }));
+      info = track?.medias.map(({ id, sources, fileType }) => ({ id, sources, fileType }));
     } else {
       info = getTrackUploadInfo(track);
     }
@@ -292,16 +295,20 @@ function getTrackUploadInfo(track: TrackItem, filterEmpty = false) {
 
   if (track.id === activeTrackId) {
     const items = props.imageList as UploadItem[];
-    return (filterEmpty ? items.filter((item) => Boolean(item.src)) : items).map(({ id, sources }) => ({
+    return (filterEmpty ? items.filter((item) => Boolean(item.src)) : items).map(({ id, sources, fileType }) => ({
       id,
       sources: (sources ?? "storyboard") as string,
+      fileType,
     }));
   }
-  return track.medias.filter((m) => !filterEmpty || Boolean(m.src)).map(({ id, sources }) => ({ id, sources: (sources ?? "storyboard") as string }));
+  return track.medias
+    .filter((m) => !filterEmpty || Boolean(m.src))
+    .map(({ id, sources, fileType }) => ({ id, sources: (sources ?? "storyboard") as string, fileType }));
 }
 const generateVideoLoad = ref(false);
 /** 批量为已勾选轨道生成视频 */
 function batchGenVideo() {
+  if (generateVideoLoad.value) return;
   const dlg = DialogPlugin.confirm({
     header: $t("workbench.generate.generateConfirm"),
     body: $t("workbench.generate.generateVideosInBatches"),
@@ -311,15 +318,22 @@ function batchGenVideo() {
       const checkedTrackData = trackList.value.filter((track) => checkedTrackIds.value.includes(track.id));
       const notHasPrompt = checkedTrackData.filter((i) => !i.prompt);
       if (notHasPrompt.length) return window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
+      generateVideoLoad.value = true;
 
       const trackData = checkedTrackData.map((track) => {
         const trackId = track.id;
         const uploadData = props.modelParmas.mode === "text" ? [] : getTrackUploadInfo(track, true);
-        return {
+        const intentPayload = {
           duration: props.clampDuration(track.duration || props.modelParmas.duration),
           prompt: track.prompt,
           uploadData,
           trackId,
+        };
+        const scope = `batch-track:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${String(trackId)}`;
+        const intent = generationIntents.getOrCreate(scope, intentPayload);
+        return {
+          ...intentPayload,
+          idempotencyKey: intent.key,
         };
       });
       const requestData = {
@@ -331,8 +345,20 @@ function batchGenVideo() {
         audio: Boolean(props.modelParmas.audio),
         trackData,
       };
+      const batchScope = `batch-request:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${checkedTrackData
+        .map((track) => track.id)
+        .sort((a, b) => a - b)
+        .join(",")}`;
       try {
-        const { data } = await axios.post("/production/workbench/batchGenerateVideo", requestData);
+        const data = await batchRequestIntents.run(batchScope, requestData, async () => {
+          const response = await axios.post("/production/workbench/batchGenerateVideo", requestData);
+          return response.data;
+        });
+        checkedTrackData.forEach((track) => {
+          const scope = `batch-track:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${String(track.id)}`;
+          const payload = trackData.find((item) => item.trackId === track.id);
+          if (payload) generationIntents.markSuccess(scope, payload.idempotencyKey);
+        });
         const videoRecordId: Record<number, number> = {};
         data.forEach((item: { videoId: number; trackId: number }) => {
           videoRecordId[item.trackId] = item.videoId;
@@ -348,6 +374,13 @@ function batchGenVideo() {
         checkedTrackIds.value = [];
         window.$message.success($t("workbench.generate.generateStarted"));
       } catch (e) {
+        if (!shouldRetainGenerationIntent(e)) {
+          checkedTrackData.forEach((track) => {
+            const scope = `batch-track:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${String(track.id)}`;
+            const payload = trackData.find((item) => item.trackId === track.id);
+            if (payload) generationIntents.clear(scope, payload.idempotencyKey);
+          });
+        }
         window.$message.error((e as any)?.message ?? $t("workbench.generate.generateError"));
       } finally {
         generateVideoLoad.value = false;

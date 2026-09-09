@@ -96,7 +96,7 @@
       "otherConfig": "其他配置",
       "requestConfig": "请求地址",
       "devConfig": "开发者选项",
-      "about": "检查更新",
+      "about": "关于与版本",
       "logoutConfig": "退出登录",
       "skillsSkillsManagement": "Skills技能管理"
     },
@@ -355,7 +355,8 @@
         "enterUsername": "请输入用户名",
         "usernameLength": "用户名长度为 2-20 个字符",
         "enterPassword": "请输入密码",
-        "passwordLength": "密码长度为 6-20 个字符",
+        "passwordLength": "密码长度为 8-128 个字符",
+        "passwordNotAllowed": "不能使用默认密码 admin123，请设置新密码",
         "fetchFailed": "获取用户信息失败",
         "saveSuccess": "保存成功",
         "saveFailed": "保存失败"
@@ -514,6 +515,13 @@
     },
     "about": {
       "slogan": "开源的AI驱动漫画 / 分镜创作工具",
+      "customEdition": "ToonFlow 定制版",
+      "updateTitle": "更新说明",
+      "adminDeploymentNotice": "更新由管理员统一部署。如需升级，请联系管理员。",
+      "backendFork": "后端代码仓库",
+      "frontendFork": "前端代码仓库",
+      "upstreamTitle": "上游项目与许可证",
+      "upstreamProject": "上游项目",
       "latestVersion": "当前为最新版本",
       "checkUpdate": "检查更新",
       "codeRepository": "代码仓库",

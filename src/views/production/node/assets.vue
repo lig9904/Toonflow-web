@@ -80,6 +80,9 @@ import { Handle, Position, type Edge } from "@vue-flow/core";
 import editImage from "../components/editImage/index.vue";
 import { type AssetItem, type DeriveAsset } from "../utils/flowBuilder";
 import axios from "@/utils/axios";
+import useProductionAgentStore from "@/stores/productionAgent";
+const productionAgent = useProductionAgentStore();
+const { episodesId } = storeToRefs(productionAgent);
 import useProjectStore from "@/stores/project";
 const { project } = storeToRefs(useProjectStore());
 const props = defineProps<{
@@ -111,23 +114,21 @@ function generateAssetsImage(row: DeriveAsset, referanceImageUrl: string) {
 }
 
 async function save({ imageUrl, flowId }: { imageUrl: string; flowId: number }) {
-  // 更新对应分镜的 src
-  if (!imageUrl) return;
-  for (const i of assets.value) {
-    const target = i.derive.find((s) => s.id === currentAssetsId.value);
-    if (target) {
-      target.state = '已完成'
-      target.src = imageUrl;
-      target.flowId = flowId;
-      break;
+  if (!imageUrl || !episodesId.value || !project.value?.id) return;
+  try {
+    await axios.post("/production/assets/updateAssetsUrl", {
+      id: currentAssetsId.value, url: imageUrl, flowId,
+      projectId: Number(project.value.id), scriptId: episodesId.value,
+    });
+    for (const parent of assets.value) {
+      const target = parent.derive.find((item) => item.id === currentAssetsId.value);
+      if (target) { target.state = "已完成"; target.src = imageUrl; target.flowId = flowId; break; }
     }
+    visible.value = false;
+  } catch (error) {
+    const message = error && typeof error === "object" && "message" in error ? String(error.message) : "资产保存失败";
+    window.$message.error(message);
   }
-
-  await axios.post("/production/assets/updateAssetsUrl", {
-    id: currentAssetsId.value,
-    url: imageUrl,
-    flowId,
-  });
 }
 
 async function removeFn(id: number) {
@@ -141,7 +142,8 @@ async function removeFn(id: number) {
       try {
         await axios.post("/production/assets/deleteAssetsDireve", {
           id,
-          projectId: project.value?.id,
+          projectId: Number(project.value?.id),
+          scriptId: episodesId.value,
         });
         //找到对应子资产删除
         assets.value.forEach((item) => {

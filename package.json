@@ -63,5 +63,13 @@
     "vite": "^5.4.10",
     "vite-plugin-singlefile": "^2.3.0",
     "vue-tsc": "^2.1.10"
+  },
+  "homepage": "https://github.com/lig9904/Toonflow-web#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lig9904/Toonflow-web.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lig9904/Toonflow-web/issues"
   }
 }

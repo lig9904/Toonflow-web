@@ -2,7 +2,7 @@
   <div class="loginPage" :style="{ height: isElectron ? 'calc(100vh - 32px)' : '100vh' }">
     <div class="formBox">
       <!-- 设置弹窗 -->
-      <t-dialog v-model:visible="showSettingModal" :header="$t('login.settings')" @confirm="handleSaveSetting" :width="400">
+      <t-dialog v-if="isElectron" v-model:visible="showSettingModal" :header="$t('login.settings')" @confirm="handleSaveSetting" :width="400">
         <t-form label-width="80px" labelAlign="top">
           <t-form-item :label="$t('login.requestAddress')">
             <t-input v-model="tempBaseUrl" placeholder="http://localhost:10588" />
@@ -23,7 +23,7 @@
           {{ $t("login.login") }}
         </t-button>
       </div>
-      <div class="tips c">{{ $t("login.tips") }}</div>
+      <div class="tips c">{{ isElectron ? $t("login.tips") : "请联系管理员获取登录账号 / Contact your administrator for an account" }}</div>
     </div>
   </div>
   <div class="settingBtn">
@@ -34,7 +34,7 @@
         </template>
       </t-button>
     </t-dropdown>
-    <t-button shape="circle" theme="primary" size="large" @click="showSettingModal = true">
+    <t-button v-if="isElectron" shape="circle" theme="primary" size="large" @click="showSettingModal = true">
       <template #icon>
         <i-setting-two theme="outline" size="20" />
       </template>
@@ -69,6 +69,7 @@ const tempBaseUrl = ref(baseUrl.value);
 
 // 保存设置
 const handleSaveSetting = () => {
+  if (!isElectron.value) return;
   baseUrl.value = tempBaseUrl.value;
   showSettingModal.value = false;
   window.$message.success($t("login.settingsSaved"));

@@ -56,7 +56,7 @@
       "fileManagement": "File Management",
       "otherConfig": "Other Config",
       "requestConfig": "Request URL",
-      "about": "Check for Updates",
+      "about": "About & Version",
       "logoutConfig": "Logout",
       "skillsSkillsManagement": "SkillsSkills Management"
     },
@@ -263,7 +263,8 @@
         "enterUsername": "Please enter username",
         "usernameLength": "Username must be 2-20 characters long",
         "enterPassword": "Please enter password",
-        "passwordLength": "Password must be 6-20 characters long",
+        "passwordLength": "Password must be 8-128 characters long",
+        "passwordNotAllowed": "The default password admin123 is not allowed; choose a new password",
         "fetchFailed": "Failed to fetch user information",
         "saveSuccess": "Saved successfully",
         "saveFailed": "Failed to save"
@@ -422,6 +423,13 @@
     },
     "about": {
       "slogan": "Open-source AI-driven Comic / Storyboard creation tool",
+      "customEdition": "ToonFlow Custom Edition",
+      "updateTitle": "Updates",
+      "adminDeploymentNotice": "Updates are deployed centrally by the administrator. Contact the administrator when an upgrade is needed.",
+      "backendFork": "Backend Repository",
+      "frontendFork": "Frontend Repository",
+      "upstreamTitle": "Upstream Project and License",
+      "upstreamProject": "Upstream Project",
       "latestVersion": "You are on the latest version",
       "checkUpdate": "Check for Updates",
       "codeRepository": "Code Repository",

@@ -42,7 +42,8 @@ const formRules: FormRules<UserForm> = {
   ],
   password: [
     { required: true, message: $t("settings.login.msg.enterPassword"), trigger: "blur" },
-    { min: 6, max: 20, message: $t("settings.login.msg.passwordLength"), trigger: "blur" },
+    { min: 8, max: 128, message: $t("settings.login.msg.passwordLength"), trigger: "blur" },
+    { validator: (value) => value !== "admin123", message: $t("settings.login.msg.passwordNotAllowed"), trigger: "blur" },
   ],
 };
 
@@ -52,7 +53,7 @@ async function fetchUserInfo() {
     formData.value = {
       id: res.data.id ?? null,
       name: res.data.name ?? "",
-      password: res.data.password ?? "",
+      password: "",
     };
   } catch (error) {
     window.$message.error($t("settings.login.msg.fetchFailed"));

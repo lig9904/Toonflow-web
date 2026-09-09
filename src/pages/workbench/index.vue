@@ -74,13 +74,11 @@
 </template>
 
 <script setup lang="ts">
-import axios from "@/utils/axios";
 import setting from "@/components/setting/index.vue";
 import hello from "@/components/hello.vue";
 import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
 import settingStore from "@/stores/setting";
-import { NotifyPlugin } from "tdesign-vue-next";
 const { showSetting, isElectron, needUpdate } = storeToRefs(settingStore());
 const menuList = ref([
   { type: "btn", path: "/project", labelKey: "workbench.menu.myProject", icon: "i-folder-close" },
@@ -117,9 +115,9 @@ function handleClick(menu: any) {
 
 async function jumpGithub() {
   if (isElectron.value) {
-    await fetch("toonflow://openurlwithbrowser?url=https://github.com/HBAI-Ltd/Toonflow-app");
+    await fetch("toonflow://openurlwithbrowser?url=https://github.com/lig9904/Toonflow-app");
   } else {
-    window.open("https://github.com/HBAI-Ltd/Toonflow-app");
+    window.open("https://github.com/lig9904/Toonflow-app", "_blank", "noopener,noreferrer");
   }
 }
 
@@ -131,69 +129,9 @@ async function openFeedback() {
   }
 }
 
-async function checkVersion() {
-  const { data } = await axios.post("/setting/about/checkUpdate", {
-    source: "toonflow",
-  });
-  if (data.needUpdate) {
-    needUpdate.value = true;
-    const { activeMenu: settingActiveMenu } = storeToRefs(settingStore());
-    const notifyInstance = NotifyPlugin.success({
-      title: $t("version.newVersion") as string,
-      content: () =>
-        h(
-          "div",
-          { style: "text-align: right; padding-top: 4px;" },
-          h(
-            "span",
-            {
-              style: "color: #ed7b2f; font-size: 12px; cursor: pointer;",
-              onClick: () => {
-                settingActiveMenu.value = "about";
-                showSetting.value = true;
-                NotifyPlugin.close(notifyInstance);
-              },
-            },
-            $t("skillScan.openSettings"),
-          ),
-        ),
-      closeBtn: true,
-      placement: "bottom-right",
-    });
-  } else {
-    needUpdate.value = false;
-  }
-}
-
-let checkVersionTimer: ReturnType<typeof setInterval> | null = null;
-
-function startVersionCheck() {
-  checkVersion();
-  checkVersionTimer = setInterval(
-    () => {
-      checkVersion();
-    },
-    2 * 60 * 1000,
-  );
-}
-
-function stopVersionCheck() {
-  if (checkVersionTimer) {
-    clearInterval(checkVersionTimer);
-    checkVersionTimer = null;
-  }
-}
-
-watch(needUpdate, (val) => {
-  if (val) stopVersionCheck();
-});
-
+// Custom deployments are updated by the operator; there is no upstream update polling.
 onMounted(() => {
-  startVersionCheck();
-});
-
-onUnmounted(() => {
-  stopVersionCheck();
+  needUpdate.value = false;
 });
 </script>
 

@@ -23,12 +23,13 @@ instance.interceptors.response.use(
     return response.data;
   },
   function (error) {
-    if (error.status === 401) {
+    const httpStatus = error?.status ?? error?.response?.status;
+    if (httpStatus === 401) {
       localStorage.removeItem("token");
       router.push("/login");
       MessagePlugin.error(window.$t("common.sessionExpired"));
     }
-    if (error.message.includes("Network Error") || error.response.data?.message === "Network Error") {
+    if (error?.message?.includes("Network Error") || error?.response?.data?.message === "Network Error") {
       NotifyPlugin.error({
         title: "Network Error",
         closeBtn: true,
@@ -68,7 +69,15 @@ instance.interceptors.response.use(
       });
     }
 
-    return Promise.reject(error?.response?.data ?? error);
+    const responseData = error?.response?.data;
+    const responseStatus = error?.response?.status;
+    if (responseData && typeof responseData === "object") {
+      return Promise.reject({ ...responseData, status: responseData.status ?? responseStatus });
+    }
+    if (responseStatus != null) {
+      return Promise.reject({ ...error, status: responseStatus });
+    }
+    return Promise.reject(error);
   },
 );
 

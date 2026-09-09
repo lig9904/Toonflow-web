@@ -1,3 +1,6 @@
+> **定制维护分支：`custom/main`**
+> 本仓库与 [Toonflow-app 定制后端](https://github.com/lig9904/Toonflow-app/tree/custom/main) 配套，包含服务端协作状态、同源网页访问和定制版更新说明。构建使用 Node.js 22；上游来源与同步规则见 [UPSTREAM.md](UPSTREAM.md)。下方保留上游项目介绍。
+
 <p align="center">
   <strong>中文</strong> | 
   <a href="./docs/README.en.md">English</a>

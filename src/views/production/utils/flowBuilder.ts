@@ -1,5 +1,6 @@
 import type { Ref } from "vue";
 import { computed } from "vue";
+import type { StoryboardReviewState, StoryboardState } from "@/utils/productionState";
 
 // ==================== 固定节点 ID ====================
 const NODE_IDS = {
@@ -53,6 +54,13 @@ export interface Storyboard {
   reason?: string;
   videoDesc: string;
   shouldGenerateImage: number;
+  version?: number;
+  reviewState?: StoryboardReviewState;
+  locked?: boolean;
+  lockedBy?: string | null;
+  updatedBy?: string | null;
+  updatedAt?: number | null;
+  collaboration?: StoryboardState;
 }
 
 interface VideoList {

@@ -7,14 +7,13 @@
 </template>
 
 <script setup lang="ts">
+import settingStore from "@/stores/setting";
 const router = useRouter();
+const { isElectron } = storeToRefs(settingStore());
 
 function goHome() {
   router.push("/");
 }
-const isElectron = computed(() => {
-  return window?.$electron;
-});
 </script>
 
 <style lang="scss" scoped>

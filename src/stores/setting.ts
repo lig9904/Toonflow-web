@@ -1,3 +1,8 @@
+export function getWebApiBaseUrl(): string | null {
+  if (typeof window === "undefined" || !/^https?:$/.test(window.location.protocol)) return null;
+  return `${window.location.origin}/api`;
+}
+
 export default defineStore(
   "setting",
   () => {
@@ -6,7 +11,7 @@ export default defineStore(
     const canvasWheelEvent = ref("zoom");
     const activeMenu = ref("ui");
 
-    const baseUrl = ref<string>("http://localhost:10588/api");
+    const baseUrl = ref<string>(getWebApiBaseUrl() ?? "http://localhost:10588/api");
 
     const needUpdate = ref(false);
 
@@ -30,7 +35,15 @@ export default defineStore(
 
     const language = ref<string>("zh-CN");
 
-    return { showSetting, baseUrl, otherSetting, themeSetting, language, activeMenu, isElectron, canvasWheelEvent, needUpdate };
+    function hydrateWebApiBaseUrl() {
+      const webBaseUrl = getWebApiBaseUrl();
+      if (webBaseUrl) {
+        baseUrl.value = webBaseUrl;
+        isElectron.value = false;
+      }
+    }
+
+    return { showSetting, baseUrl, hydrateWebApiBaseUrl, otherSetting, themeSetting, language, activeMenu, isElectron, canvasWheelEvent, needUpdate };
   },
   { persist: { pick: ["baseUrl", "otherSetting", "themeSetting", "language"] } },
 );

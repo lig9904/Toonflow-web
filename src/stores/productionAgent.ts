@@ -3,6 +3,12 @@ import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
 import { useChat } from "@/utils/useChat";
 import type { FlowData, Storyboard } from "@/views/production/utils/flowBuilder";
+import {
+  getProductionStateErrorMessage,
+  getProductionStateErrorStatus,
+  getStoryboardState,
+  type StoryboardStateResponse,
+} from "@/utils/productionState";
 import type { ChatMessagesData } from "@tdesign-vue-next/chat";
 import { useThrottleFn } from "@vueuse/core";
 
@@ -38,12 +44,28 @@ function makeProductionAgentStore(projectId: string) {
     });
 
     const episodesId = ref<number>();
+    const planningVersion = ref<number>();
+    const planningEpisodeId = ref<number>();
+    const storyboardEditingIds = ref<number[]>([]);
+    let flowLoadSequence = 0;
+    type PendingFlowSave = { scriptId: number; expectedPlanningVersion: number; loadSequence: number; snapshot: FlowData };
+    let pendingFlowSave: PendingFlowSave | null = null;
+    const readPendingFlowSave = (): PendingFlowSave | null => pendingFlowSave;
+    let flowSavePromise: Promise<void> | null = null;
+
+    watch(episodesId, (nextEpisodeId, previousEpisodeId) => {
+      if (previousEpisodeId == null || nextEpisodeId === previousEpisodeId) return;
+      flowLoadSequence++;
+      planningVersion.value = undefined;
+      planningEpisodeId.value = undefined;
+      pendingFlowSave = null;
+    });
 
     const { connected, messages, chat, stopGenerate, socket, status, reconnect, connect, disconnect } = useChat({
       url: `${settingStore().baseUrl}/socket/productionAgent`,
       auth: () => ({
         isolationKey: `${projectId}:productionAgent:${episodesId.value}`,
-        projectId: projectId,
+        projectId: Number(projectId),
         scriptId: episodesId.value,
       }),
       manageLifecycle: false,
@@ -129,6 +151,12 @@ function makeProductionAgentStore(projectId: string) {
         if (s) {
           s.on("connect", () => {
             getHistory();
+          });
+          s.on("productionStateChanged", (event: { projectId: number | string; scriptId: number | string; storyboardId?: number | string | null }) => {
+            if (Number(event?.projectId) !== Number(projectId) || Number(event?.scriptId) !== Number(episodesId.value)) return;
+            const storyboardId = Number(event?.storyboardId);
+            if (event?.storyboardId != null && event?.storyboardId !== "" && Number.isFinite(storyboardId)) void refreshStoryboard(storyboardId, Number(event.scriptId));
+            else void refreshStoryboardWorkflow(Number(event.scriptId));
           });
           s.on("getFlowData", (_, callback) => {
             const returnData = JSON.parse(JSON.stringify(flowData.value));
@@ -216,26 +244,190 @@ function makeProductionAgentStore(projectId: string) {
       { immediate: true },
     );
 
-    async function setFlowData(scriptId?: number) {
-      await axios.post("/production/saveFlowData", {
-        projectId: projectId,
-        data: flowData.value,
-        episodesId: scriptId || episodesId.value,
+    function cloneFlowData(data: FlowData): FlowData {
+      return JSON.parse(JSON.stringify(data)) as FlowData;
+    }
+
+    function applyStoryboardVersions(versions: Record<number, number> | undefined) {
+      if (!versions) return;
+      flowData.value.storyboard.forEach((item) => {
+        if (item.id == null || versions[item.id] == null) return;
+        const version = Number(versions[item.id]);
+        if (!Number.isFinite(version)) return;
+        item.version = version;
+        item.collaboration = {
+          ...(item.collaboration ?? {
+            entityType: "storyboard",
+            entityId: item.id,
+            projectId,
+            reviewState: "draft" as const,
+            locked: false,
+            lockedBy: null,
+            updatedBy: null,
+            updatedAt: null,
+          }),
+          entityId: item.id,
+          projectId,
+          version,
+        };
       });
     }
 
-    async function getFlowData() {
+    async function flushFlowSaves(): Promise<void> {
+      while (pendingFlowSave) {
+        const save = pendingFlowSave;
+        pendingFlowSave = null;
+        const isCurrentEpisode =
+          save.scriptId === episodesId.value && save.scriptId === planningEpisodeId.value && save.loadSequence === flowLoadSequence;
+        if (!isCurrentEpisode || planningVersion.value == null) {
+          if (isCurrentEpisode) window.$message.warning("规划版本尚未读取，暂不保存");
+          continue;
+        }
+        const expectedPlanningVersion = save.expectedPlanningVersion === planningVersion.value ? save.expectedPlanningVersion : planningVersion.value;
+        try {
+          const response = await axios.post("/production/saveFlowData", {
+            projectId: Number(projectId),
+            data: save.snapshot,
+            episodesId: save.scriptId ?? episodesId.value,
+            expectedPlanningVersion,
+          });
+          const data = response?.data ?? response;
+          const nextVersion = Number(data?.planningVersion);
+          if (!Number.isFinite(nextVersion)) {
+            throw new Error("保存响应缺少 planningVersion");
+          }
+          if (save.scriptId === episodesId.value && save.scriptId === planningEpisodeId.value && save.loadSequence === flowLoadSequence) {
+            planningVersion.value = nextVersion;
+            applyStoryboardVersions(data?.storyboardVersions);
+          }
+        } catch (error) {
+          const status = getProductionStateErrorStatus(error);
+          if (status === 409) {
+            window.$message.warning("规划已被其他会话修改，本地草稿已保留；请重新载入后再合并");
+          } else {
+            window.$message.error(getProductionStateErrorMessage(error, "规划保存失败"));
+          }
+          // A conflicting snapshot must never be retried against a newly fetched version.
+          const queuedSave = readPendingFlowSave();
+          if (queuedSave?.scriptId === save.scriptId && queuedSave.loadSequence === save.loadSequence) {
+            pendingFlowSave = null;
+          }
+        }
+      }
+    }
+
+    async function setFlowData(scriptId?: number): Promise<void> {
+      const saveScriptId = scriptId ?? episodesId.value;
+      if (saveScriptId == null || planningVersion.value == null || planningEpisodeId.value !== saveScriptId) {
+        window.$message.warning("规划版本尚未读取，暂不保存");
+        return;
+      }
+      pendingFlowSave = {
+        scriptId: saveScriptId,
+        expectedPlanningVersion: planningVersion.value,
+        loadSequence: flowLoadSequence,
+        snapshot: cloneFlowData(flowData.value),
+      };
+      if (!flowSavePromise) {
+        flowSavePromise = flushFlowSaves().finally(() => {
+          flowSavePromise = null;
+          if (pendingFlowSave && planningVersion.value != null) void setFlowData(pendingFlowSave.scriptId);
+        });
+      }
+      await flowSavePromise;
+    }
+
+    async function requestFlowData(scriptId: number): Promise<{ data: FlowData; planningVersion?: number }> {
       const { data } = await axios.post("/production/getFlowData", {
-        projectId: projectId,
-        episodesId: episodesId.value,
+        projectId: Number(projectId),
+        episodesId: scriptId,
       });
-      flowData.value = data;
+      const nextPlanningVersion = Number(data?.planningVersion);
+      const { planningVersion: _planningVersion, ...nextFlowData } = data ?? {};
+      return { data: nextFlowData as FlowData, planningVersion: Number.isFinite(nextPlanningVersion) ? nextPlanningVersion : undefined };
+    }
+
+    async function getFlowData() {
+      const scriptId = episodesId.value;
+      if (scriptId == null) return;
+      const requestSequence = ++flowLoadSequence;
+      const result = await requestFlowData(scriptId);
+      if (requestSequence !== flowLoadSequence || episodesId.value !== scriptId) return;
+      planningVersion.value = result.planningVersion;
+      planningEpisodeId.value = scriptId;
+      flowData.value = result.data;
+    }
+
+    function mergeStoryboardWorkflow(serverData: FlowData) {
+      const localStoryboard = new Map(flowData.value.storyboard.filter((item) => item.id != null).map((item) => [item.id!, item]));
+      const serverIds = new Set(serverData.storyboard.filter((item) => item.id != null).map((item) => item.id!));
+      serverData.storyboard.forEach((serverItem) => {
+        if (serverItem.id == null) return;
+        const localItem = localStoryboard.get(serverItem.id);
+        if (localItem && storyboardEditingIds.value.includes(serverItem.id)) return;
+        if (localItem) Object.assign(localItem, serverItem);
+        else flowData.value.storyboard.push(serverItem);
+      });
+      flowData.value.storyboard = flowData.value.storyboard.filter(
+        (item) => item.id == null || serverIds.has(item.id) || storyboardEditingIds.value.includes(item.id),
+      );
+      flowData.value.assets = serverData.assets;
+    }
+
+    async function refreshStoryboardWorkflow(scriptId = episodesId.value) {
+      if (scriptId == null || scriptId !== episodesId.value) return;
+      const requestSequence = flowLoadSequence;
+      try {
+        const result = await requestFlowData(scriptId);
+        if (requestSequence !== flowLoadSequence || episodesId.value !== scriptId) return;
+        mergeStoryboardWorkflow(result.data);
+      } catch (error) {
+        console.error("[productionStateChanged] refresh workflow failed", error);
+      }
+    }
+
+    function setStoryboardEditing(id: number, editing: boolean) {
+      if (editing) {
+        if (!storyboardEditingIds.value.includes(id)) storyboardEditingIds.value.push(id);
+      } else {
+        storyboardEditingIds.value = storyboardEditingIds.value.filter((itemId) => itemId !== id);
+      }
+    }
+
+    async function refreshStoryboard(id: number, scriptId = episodesId.value): Promise<StoryboardStateResponse | undefined> {
+      if (scriptId == null || scriptId !== episodesId.value) return undefined;
+      const requestSequence = flowLoadSequence;
+      if (storyboardEditingIds.value.includes(id)) return undefined;
+      try {
+        const response = await getStoryboardState(projectId, id);
+        if (requestSequence !== flowLoadSequence || episodesId.value !== scriptId) return undefined;
+        const stateFields = {
+          collaboration: response.state,
+          version: response.state.version,
+          reviewState: response.state.reviewState,
+          locked: response.state.locked,
+          lockedBy: response.state.lockedBy,
+          updatedBy: response.state.updatedBy,
+          updatedAt: response.state.updatedAt,
+        };
+        const target = flowData.value.storyboard.find((item) => item.id === id);
+        if (target) Object.assign(target, response.storyboard, stateFields);
+        else flowData.value.storyboard.push({ ...response.storyboard, ...stateFields } as Storyboard);
+        return response;
+      } catch (error) {
+        if (getProductionStateErrorStatus(error) === 404) {
+          flowData.value.storyboard = flowData.value.storyboard.filter((item) => item.id !== id || storyboardEditingIds.value.includes(id));
+          return undefined;
+        }
+        console.error("[productionStateChanged] refresh storyboard failed", error);
+        return undefined;
+      }
     }
     async function batchGenerateStoryboard(allIds: number[], compulsory: boolean = false) {
       try {
         const { data } = await axios.post("/production/storyboard/batchGenerateImage", {
           scriptId: episodesId.value,
-          projectId: projectId,
+          projectId: Number(projectId),
           storyboardIds: allIds,
           concurrentCount: settingStore().otherSetting.assetsBatchGenereateSize,
           compulsory,
@@ -256,23 +448,14 @@ function makeProductionAgentStore(projectId: string) {
         }
         return data;
       } catch (e) {
-        window.$message.error((e as any)?.message);
+        throw e;
       }
     }
     async function batchGenerateAssets(allIds: number[]) {
-      flowData.value.assets.forEach((asset) => {
-        if (asset.derive) {
-          asset.derive.forEach((derive) => {
-            if (allIds.includes(derive.id)) {
-              derive.state = "生成中" as "未生成" | "生成中" | "已完成" | "生成失败";
-            }
-          });
-        }
-      });
       try {
         const { data } = await axios.post("/production/assets/batchGenerateAssetsImage", {
           assetIds: allIds,
-          projectId: projectId,
+          projectId: Number(projectId),
           scriptId: episodesId.value,
           concurrentCount: settingStore().otherSetting.assetsBatchGenereateSize,
         });
@@ -291,7 +474,9 @@ function makeProductionAgentStore(projectId: string) {
           });
         }
         return data;
-      } catch (e) {}
+      } catch (e) {
+        throw e;
+      }
     }
     const assetsNotStateImageIds = computed(() => {
       const ids: number[] = [];
@@ -444,7 +629,7 @@ function makeProductionAgentStore(projectId: string) {
       if (episodesId.value! < 0) return;
       const ctx = {
         isolationKey: `${projectId}:productionAgent:${episodesId.value}`,
-        projectId: projectId,
+        projectId: Number(projectId),
         scriptId: episodesId.value,
       };
       if (!connected.value) connect();
@@ -454,7 +639,7 @@ function makeProductionAgentStore(projectId: string) {
       const { data } = await axios.post("/production/storyboard/batchAddStoryboardInfo", {
         scriptId: episodesId.value,
         data: items,
-        projectId: projectId,
+        projectId: Number(projectId),
       });
 
       flowData.value.storyboard.forEach((item) => {
@@ -465,6 +650,15 @@ function makeProductionAgentStore(projectId: string) {
           item.src = updated.src;
           item.state = updated.state;
           item.associateAssetsIds = updated.associateAssetsIds;
+          if (updated.collaboration) {
+            item.collaboration = updated.collaboration;
+            item.version = updated.collaboration.version;
+            item.reviewState = updated.collaboration.reviewState;
+            item.locked = updated.collaboration.locked;
+            item.lockedBy = updated.collaboration.lockedBy;
+            item.updatedBy = updated.collaboration.updatedBy;
+            item.updatedAt = updated.collaboration.updatedAt;
+          }
         }
       });
     }
@@ -473,7 +667,7 @@ function makeProductionAgentStore(projectId: string) {
     async function getHistory() {
       loadingHistory.value = true;
       const { data } = await axios.post(`/agents/getMemory`, {
-        projectId: projectId,
+        projectId: Number(projectId),
         episodesId: episodesId.value,
         agentType: "productionAgent",
       });
@@ -499,8 +693,11 @@ function makeProductionAgentStore(projectId: string) {
       socket,
       status,
       flowData,
+      planningVersion,
       setFlowData,
       getFlowData,
+      refreshStoryboard,
+      setStoryboardEditing,
       episodesId,
       stopAssetsPolling,
       stopStoryboardPolling,

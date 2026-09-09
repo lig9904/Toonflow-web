@@ -55,7 +55,7 @@
       "fileManagement": "Quản lý tệp",
       "otherConfig": "Cấu hình khác",
       "requestConfig": "Địa chỉ yêu cầu (API)",
-      "about": "Kiểm tra cập nhật",
+      "about": "Giới thiệu và phiên bản",
       "logoutConfig": "Đăng xuất",
       "skillsSkillsManagement": "Kỹ năngQuản lý kỹ năng"
     },
@@ -261,7 +261,8 @@
         "enterUsername": "Vui lòng nhập tên người dùng",
         "usernameLength": "Độ dài tên người dùng từ 2-20 ký tự",
         "enterPassword": "Vui lòng nhập mật khẩu",
-        "passwordLength": "Độ dài mật khẩu từ 6-20 ký tự",
+        "passwordLength": "Độ dài mật khẩu từ 8-128 ký tự",
+        "passwordNotAllowed": "Không được sử dụng mật khẩu mặc định admin123; hãy đặt mật khẩu mới",
         "fetchFailed": "Lấy thông tin người dùng thất bại",
         "saveSuccess": "Lưu thành công",
         "saveFailed": "Lưu thất bại"
@@ -346,6 +347,13 @@
     },
     "about": {
       "slogan": "Công cụ sáng tạo truyện tranh / phân cảnh mã nguồn mở do AI điều khiển",
+      "customEdition": "Phiên bản tùy chỉnh ToonFlow",
+      "updateTitle": "Thông tin cập nhật",
+      "adminDeploymentNotice": "Bản cập nhật được quản trị viên triển khai tập trung. Hãy liên hệ quản trị viên khi cần nâng cấp.",
+      "backendFork": "Kho mã backend",
+      "frontendFork": "Kho mã frontend",
+      "upstreamTitle": "Dự án nguồn và giấy phép",
+      "upstreamProject": "Dự án nguồn",
       "latestVersion": "Đây là phiên bản mới nhất",
       "checkUpdate": "Kiểm tra cập nhật",
       "codeRepository": "Kho lưu trữ mã nguồn",

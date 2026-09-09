@@ -56,7 +56,7 @@
       "fileManagement": "ファイル管理",
       "otherConfig": "その他の設定",
       "requestConfig": "リクエストURL",
-      "about": "アップデートの確認",
+      "about": "概要とバージョン",
       "logoutConfig": "ログアウト",
       "skillsSkillsManagement": "スキルスキル管理"
     },
@@ -262,7 +262,8 @@
         "enterUsername": "ユーザー名を入力してください",
         "usernameLength": "ユーザー名は2〜20文字である必要があります",
         "enterPassword": "パスワードを入力してください",
-        "passwordLength": "パスワードは6〜20文字である必要があります",
+        "passwordLength": "パスワードは8〜128文字である必要があります",
+        "passwordNotAllowed": "既定のパスワード admin123 は使用できません。新しいパスワードを設定してください",
         "fetchFailed": "ユーザー情報の取得に失敗しました",
         "saveSuccess": "保存に成功しました",
         "saveFailed": "保存に失敗しました"
@@ -351,6 +352,13 @@
     },
     "about": {
       "slogan": "オープンソースのAI主導コミック/絵コンテ制作ツール",
+      "customEdition": "ToonFlow カスタム版",
+      "updateTitle": "更新について",
+      "adminDeploymentNotice": "更新は管理者が一括で配布します。アップグレードが必要な場合は管理者に連絡してください。",
+      "backendFork": "バックエンドリポジトリ",
+      "frontendFork": "フロントエンドリポジトリ",
+      "upstreamTitle": "上流プロジェクトとライセンス",
+      "upstreamProject": "上流プロジェクト",
       "latestVersion": "現在は最新バージョンです",
       "checkUpdate": "アップデートの確認",
       "codeRepository": "コードリポジトリ",
