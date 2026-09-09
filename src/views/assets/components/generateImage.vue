@@ -143,9 +143,11 @@ import modelSelect from "@/components/modelSelect.vue";
 import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
 import axios from "@/utils/axios";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const props = defineProps<{
   formData: {
-    id?: number;
+  id?: number;
+  version?: number;
     name?: string;
     describe?: string;
     type?: string;
@@ -348,7 +350,7 @@ function deleteImage(id: string | number, index: number) {
     theme: "warning",
     onConfirm: async () => {
       try {
-        axios.post("/assets/delImage", { id: id });
+        await axios.post("/assets/delImage", { id, projectId: Number(project.value?.id), idempotencyKey: createIdempotencyKey("asset-image-delete") });
         window.$message.success($t("workbench.assets.deleteSuccess"));
         resultImages.value.splice(index, 1);
         if (selectedImageIndex.value === index) {
@@ -377,6 +379,8 @@ async function onClick() {
       prompt: props.formData.prompt,
       projectId: project.value?.id,
       imageId: isLocalUpload ? undefined : Number(selectedImage.id),
+      expectedVersion: props.formData.version,
+      idempotencyKey: createIdempotencyKey("asset-image-save"),
     });
     window.$message.success($t("workbench.assets.gen.imageSaved"));
     generateImageShow.value = false;

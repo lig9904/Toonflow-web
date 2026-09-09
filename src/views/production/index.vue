@@ -91,7 +91,7 @@
         <i-menu-unfold-one theme="outline" size="24" />
       </div>
       <transition name="slide" v-show="openShowVisible" v-if="episodesId">
-        <rightChatBox :title="title" v-model="flowData" @close="openShowVisible = false" />
+        <rightChatBox :title="title" v-model="flowData" @close="openShowVisible = false" @navigate-artifact="openBuiltinArtifact" />
       </transition>
     </div>
     <t-guide v-model="current" :steps="steps" @finish="() => (current = -1)" />
@@ -116,6 +116,7 @@ import storyboard from "./node/storyboard.vue";
 import workbench from "./node/workbench.vue";
 import poster from "./node/poster.vue";
 import rightChatBox from "./components/rightChatBox/index.vue";
+import type { BuiltinArtifactTarget } from "@/types/builtinAgent";
 import { useLayout } from "./utils/dagre";
 import { useFlowBuilder } from "./utils/flowBuilder";
 import axios from "@/utils/axios";
@@ -125,6 +126,8 @@ const { project } = storeToRefs(projectStore());
 import settingStore from "@/stores/setting";
 const { canvasWheelEvent, otherSetting } = storeToRefs(settingStore());
 const openShowVisible = ref(true);
+const router = useRouter();
+const route = useRoute();
 const {
   toObject,
   fromObject,
@@ -305,12 +308,32 @@ async function getScriptData() {
     value: ep.id,
   }));
   if (episodesOptions.value.length) {
-    episodesId.value = episodesOptions.value[0].value;
+    const requestedScriptId = Number(route.query.scriptId);
+    episodesId.value = episodesOptions.value.some((option) => option.value === requestedScriptId) ? requestedScriptId : episodesOptions.value[0].value;
   }
   if (status.value !== "pending" && status.value !== "streaming") {
     episodesId.value && (await productionAgentStore().getFlowData());
     await productionAgentStore().getHistory();
   }
+}
+
+async function openBuiltinArtifact(target: BuiltinArtifactTarget) {
+  if (target === "novel") {
+    await router.push("/novel");
+    return;
+  }
+  if (target === "assets") {
+    await router.push("/assets");
+    return;
+  }
+  if (target === "script") {
+    await router.push({ path: "/scriptAgent", query: { tab: "script" } });
+    return;
+  }
+  const nodeId = target === "planning" ? "scriptPlan" : target === "videos" ? "workbench" : "storyboard";
+  openShowVisible.value = false;
+  await nextTick();
+  if (findNode(nodeId)) fitView({ nodes: [nodeId], duration: 300, padding: 0.15 });
 }
 
 async function layoutGraph(direction: "LR" | "TB" = "LR") {

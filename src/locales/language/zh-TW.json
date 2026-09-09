@@ -56,6 +56,7 @@
       "language": "語言設定",
       "vendorConfig": "模型服務",
       "agentConfig": "Agent 設定",
+      "teamMembers": "團隊成員",
       "promptManage": "提示詞管理",
       "skillManagement": "Skills技能管理",
       "memoryConfig": "Agent 記憶設定",

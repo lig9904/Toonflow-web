@@ -41,21 +41,21 @@
             <t-loading size="24px" />
             <span class="loadingText">{{ $t("workbench.generate.generating") }}</span>
           </div>
-          <t-tooltip v-if="v.state == '生成失败'" placement="top" :content="v?.errorReason! ?? ''" theme="light">
+          <t-tooltip v-if="v.state === '生成失败' || v.state === '需人工核对'" placement="top" :content="v?.errorReason! ?? ''" theme="light">
             <t-tag class="stateTag" theme="danger" size="small">
-              {{ $t("workbench.generate.generateFailed") }}
+              {{ v.state === '需人工核对' ? '需人工核对' : $t("workbench.generate.generateFailed") }}
             </t-tag>
           </t-tooltip>
-          <div v-if="v.state !== '生成中'" class="selectBtn" @click.stop="selectVideo(v)">
+          <div v-if="v.state === '已完成' || v.state === '生成成功'" class="selectBtn" @click.stop="selectVideo(v)">
             <i-check size="16" />
           </div>
           <div class="delBtn" @click.stop="handleDeleteVideo(v)">
             <i-delete size="16" />
           </div>
-          <div v-if="v.state !== '生成中' && v.state !== '生成失败'" class="download" @click.stop="downloadVideo(v)">
+          <div v-if="v.state === '已完成' || v.state === '生成成功'" class="download" @click.stop="downloadVideo(v)">
             <i-to-bottom size="16" />
           </div>
-          <div v-if="v.state !== '生成中' && v.state !== '生成失败'" class="playBtn" @click.stop="openVideoPlayer(v)">
+          <div v-if="v.state === '已完成' || v.state === '生成成功'" class="playBtn" @click.stop="openVideoPlayer(v)">
             <i-play size="16" />
           </div>
         </div>
@@ -81,6 +81,7 @@
 import type { Ref } from "vue";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
+import { createIdempotencyKey } from "@/utils/idempotency";
 
 const props = defineProps<{
   activeTrackIndex: number;
@@ -101,21 +102,30 @@ const selectVideoId = ref();
 const videoCoverMap = ref<Record<string, string>>({});
 const videoPlayerVisible = ref(false);
 const playingVideoSrc = ref<string>();
+const mutationKeys = new Map<string, string>();
+function trackMutationKey(action: string, videoId: number) {
+  const identity = `${action}:${currentTrack.value.id}:${currentTrack.value.version}:${videoId}`;
+  if (!mutationKeys.has(identity)) mutationKeys.set(identity, createIdempotencyKey(action));
+  return mutationKeys.get(identity)!;
+}
 
 /** 选中历史视频并同步到后端 */
 async function selectVideo(v: HistoryVideoItem) {
-  if (v.state === "生成中" || v.state === "生成失败") return;
+  if (!["已完成", "生成成功"].includes(v.state ?? "")) return;
   try {
     await axios.post("/production/workbench/selectVideo", {
       projectId: project.value?.id,
       scriptId: episodesId.value ?? 0,
       videoId: v.id,
       trackId: currentTrack?.value.id,
+      expectedVersion: currentTrack.value.version,
+      idempotencyKey: trackMutationKey("video-select", v.id),
     });
     window.$message.success($t("workbench.generate.selectVideoSuccess"));
     emit("refresh");
-  } catch {
-    window.$message.error($t("workbench.generate.selectVideoFailed"));
+  } catch (error: any) {
+    window.$message.error(error?.message || error?.response?.data?.message || $t("workbench.generate.selectVideoFailed"));
+    if ((error?.status ?? error?.response?.status) === 409) emit("refresh");
   }
 }
 
@@ -125,11 +135,20 @@ function handleDeleteVideo(value: HistoryVideoItem) {
     header: $t("workbench.generate.del"),
     body: $t("workbench.generate.delVideo"),
     onConfirm: () => {
-      axios.post("/production/workbench/delVideo", { id: value.id }).then(() => {
+      axios.post("/production/workbench/delVideo", {
+        id: value.id,
+        projectId: Number(project.value?.id),
+        scriptId: episodesId.value ?? 0,
+        trackId: currentTrack.value.id,
+        expectedVersion: currentTrack.value.version,
+        idempotencyKey: trackMutationKey("video-delete", value.id),
+      }).then(() => {
         window.$message.success($t("workbench.generate.delSuccess"));
         emit("refresh");
         dlg.destroy();
-        currentTrack.value.videoList.filter((item) => item.id == value.id);
+      }).catch((error: any) => {
+        window.$message.error(error?.message || error?.response?.data?.message || "视频删除失败");
+        if ((error?.status ?? error?.response?.status) === 409) emit("refresh");
       });
     },
     onCancel: () => dlg.destroy(),

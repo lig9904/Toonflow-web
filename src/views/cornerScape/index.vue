@@ -250,6 +250,7 @@ import projectStore from "@/stores/project";
 import modelSelect from "@/components/modelSelect.vue";
 import settingStore from "@/stores/setting";
 import openAssetsSelector from "@/utils/assetsCheck";
+import { createIdempotencyKey } from "@/utils/idempotency";
 
 const { otherSetting } = storeToRefs(settingStore());
 interface Image {
@@ -258,6 +259,7 @@ interface Image {
 }
 interface DataItem {
   id: number;
+  version: number;
   imageId: number;
   type: string;
   name: string;
@@ -508,6 +510,7 @@ async function openDrawer(item: DataItem) {
       currentItem.value = freshItem;
       editForm.prompt = freshItem.prompt || editForm.prompt;
       editForm.resolution = freshItem.resolution || editForm.resolution;
+      editForm.relepedAudio = [...freshItem.relepedAudio];
     }
   } catch (e) {
     console.error("刷新资产详情失败:", e);
@@ -659,29 +662,35 @@ async function batchSelectBindAudio() {
     return;
   }
 
-  const items = dataList.value.filter((item) => selectedIds.value.includes(item.id));
-
-  // 前端先将所有选中项的 promptState 标记为"生成中"，让轮询自动接管状态跟踪
-  items.forEach((item) => {
-    item.audioBindState = "生成中";
-  });
-
-  // 清除已选中的项
-  selectedIds.value = [];
+  const items = dataList.value.filter((item) => selectedIds.value.includes(item.id) && item.type === "role");
+  if (items.length !== selectedIds.value.length) {
+    window.$message.warning("音色匹配只支持角色素材");
+    return;
+  }
+  if (!items.length || items.some((item) => !Number.isSafeInteger(item.version))) {
+    window.$message.warning("请选择已加载最新版本的角色素材");
+    return;
+  }
 
   try {
-    await axios.post("/cornerScape/batchBindAudio", {
-      projectId: project.value?.id,
-      assetsIds: items.map((item) => item.id),
-      concurrentCount: otherSetting.value.assetsBatchGenereateSize,
+    const { data } = await axios.post("/cornerScape/batchBindAudio", {
+      projectId: Number(project.value?.id),
+      items: items.map((item) => ({ roleAssetId: item.id, expectedVersion: item.version })),
+      idempotencyKey: createIdempotencyKey("audio-match"),
     });
+    if (!data?.run?.id) throw new Error("音色匹配响应缺少内置运行编号");
+    audioMatchRunId.value = data.run.id;
+    audioMatchRoleIds.value = items.map((item) => item.id);
+    items.forEach((item) => {
+      item.audioBindState = ["succeeded", "failed", "reconciliation_required", "cancelled"].includes(data.run.status)
+        ? data.run.status === "succeeded" ? "已完成" : "生成失败"
+        : "生成中";
+    });
+    if (!items.some((item) => item.audioBindState === "生成中")) await getFilteredData();
+    selectedIds.value = [];
+    window.$message.success(`音色匹配任务已提交：${data?.run?.id ?? "请在内置 Agent 中查看"}`);
   } catch (e: any) {
     window.$message.error(e.message ?? $t("workbench.cornerScape.msg.promptGenFail"));
-    // 生成失败时重置 audioBindState
-    items.forEach((item) => {
-      const target = dataList.value.find((row) => row.id === item.id);
-      if (target) target.audioBindState = "";
-    });
   }
 }
 // 批量生成图片
@@ -745,9 +754,8 @@ const notCompultedData = computed(() => {
 const generatingData = computed(() => {
   return dataList.value.filter((item) => item.state === "生成中");
 });
-const audioBindData = computed(() => {
-  return dataList.value.filter((item) => item.audioBindState === "生成中");
-});
+const audioMatchRunId = ref<string | null>(null);
+const audioMatchRoleIds = ref<number[]>([]);
 // 轮询相关
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
 let imagePollingTimer: ReturnType<typeof setInterval> | null = null;
@@ -837,22 +845,25 @@ async function pollingImageAssets() {
 }
 //轮询音频绑定生成
 async function pollingAudioBind() {
-  if (audioBindData.value.length === 0) return;
-  const ids = audioBindData.value.map((item) => item.id);
+  if (!audioMatchRunId.value || audioMatchRoleIds.value.length === 0) return;
+  const ids = audioMatchRoleIds.value;
   try {
-    const { data } = await axios.post("/cornerScape/pollingAudio", { ids });
+    const { data } = await axios.post("/cornerScape/pollingAudio", { ids, projectId: Number(project.value?.id), runId: audioMatchRunId.value });
     let hasCompleted = false;
     if (Array.isArray(data) && data.length) {
-      data.forEach((item: { id: number; audioBindState: string; filePath: string }) => {
+      data.forEach((item: { id: number; version: number; audioBindState: string; relepedAudio: Array<{ id: number; name: string }> }) => {
         const target = dataList.value.find((row) => row.id === item.id);
         if (target) {
           if (target.audioBindState === "生成中" && item.audioBindState !== "生成中") hasCompleted = true;
           target.audioBindState = item.audioBindState;
-          if (item.filePath !== undefined) target.filePath = item.filePath;
+          target.version = item.version;
+          target.relepedAudio = item.relepedAudio;
         }
       });
     }
     if (hasCompleted) {
+      audioMatchRunId.value = null;
+      audioMatchRoleIds.value = [];
       try {
         const { data: freshData } = await axios.post("/cornerScape/getAllAssets", {
           projectId: project.value?.id,
@@ -920,7 +931,7 @@ function stopAudioPolling() {
 function startAudioPolling() {
   if (audioBindPollingTimer) return;
   audioBindPollingTimer = setInterval(async () => {
-    if (audioBindData.value.length === 0) {
+    if (!audioMatchRunId.value) {
       stopAudioPolling();
       return;
     }
@@ -944,8 +955,8 @@ watch(generatingData, (val) => {
   }
 });
 
-watch(audioBindData, (val) => {
-  if (val.length > 0) {
+watch(audioMatchRunId, (val) => {
+  if (val) {
     startAudioPolling();
   } else {
     stopAudioPolling();
@@ -953,9 +964,24 @@ watch(audioBindData, (val) => {
 });
 async function removeAudio(id: number) {
   editForm.relepedAudio = editForm.relepedAudio.filter((a) => a.id !== id);
-  await axios.post("/cornerScape/updateAssetsAudio", {
-    assetsId: editForm.assetsId,
-  });
+  if (!currentItem.value || !Number.isSafeInteger(currentItem.value.version)) return window.$message.error("角色版本尚未加载，请刷新后重试");
+  try {
+    const { data } = await axios.post("/cornerScape/updateAssetsAudio", {
+      projectId: Number(project.value?.id),
+      roleAssetId: editForm.assetsId,
+      expectedVersion: currentItem.value.version,
+      audioIds: [],
+      audioVersions: [],
+      idempotencyKey: createIdempotencyKey("role-audio-clear"),
+    });
+    currentItem.value.version = Number(data.binding.version);
+    currentItem.value.relepedAudio = data.binding.audioFamilies;
+    editForm.relepedAudio = data.binding.audioFamilies;
+    const target = dataList.value.find((item) => item.id === currentItem.value!.id);
+    if (target) Object.assign(target, { version: currentItem.value.version, relepedAudio: currentItem.value.relepedAudio });
+  } catch (error: any) {
+    window.$message.error(error.message ?? "音色清除失败；当前草稿已保留");
+  }
 }
 async function selectAudio() {
   const assets = await openAssetsSelector({
@@ -965,11 +991,28 @@ async function selectAudio() {
     multiple: false,
   });
   if (assets.length) {
-    editForm.relepedAudio = [{ id: assets[0].id, name: assets[0].name }];
-    await axios.post("/cornerScape/updateAssetsAudio", {
-      assetsId: editForm.assetsId,
-      audioIds: editForm.relepedAudio.map((i) => i.id),
-    });
+    const selected = assets[0] as typeof assets[number] & { version?: number };
+    editForm.relepedAudio = [{ id: selected.id, name: selected.name }];
+    if (!currentItem.value || !Number.isSafeInteger(currentItem.value.version) || !Number.isSafeInteger(selected.version)) {
+      return window.$message.error("角色或音频版本尚未加载，请刷新后重试");
+    }
+    try {
+      const { data } = await axios.post("/cornerScape/updateAssetsAudio", {
+        projectId: Number(project.value?.id),
+        roleAssetId: editForm.assetsId,
+        expectedVersion: currentItem.value.version,
+        audioIds: [selected.id],
+        audioVersions: [{ id: selected.id, expectedVersion: selected.version }],
+        idempotencyKey: createIdempotencyKey("role-audio-bind"),
+      });
+      currentItem.value.version = Number(data.binding.version);
+      currentItem.value.relepedAudio = data.binding.audioFamilies;
+      editForm.relepedAudio = data.binding.audioFamilies;
+      const target = dataList.value.find((item) => item.id === currentItem.value!.id);
+      if (target) Object.assign(target, { version: currentItem.value.version, relepedAudio: currentItem.value.relepedAudio });
+    } catch (error: any) {
+      window.$message.error(error.message ?? "音色绑定失败；当前选择草稿已保留");
+    }
   }
 }
 </script>

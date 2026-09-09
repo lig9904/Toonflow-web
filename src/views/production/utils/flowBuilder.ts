@@ -18,6 +18,7 @@ type NodeId = (typeof NODE_IDS)[keyof typeof NODE_IDS];
 // ==================== 类型定义 ====================
 export interface DeriveAsset {
   id: number;
+  version?: number;
   assetsId: number | null;
   name: string;
   prompt: string;
@@ -31,6 +32,7 @@ export interface DeriveAsset {
 
 export interface AssetItem {
   id: number;
+  version?: number;
   name: string;
   desc: string;
   prompt: string;

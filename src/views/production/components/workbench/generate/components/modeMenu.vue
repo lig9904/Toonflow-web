@@ -78,12 +78,16 @@
 <script setup lang="ts">
 import "@/views/production/components/workbench/type/type";
 import axios from "@/utils/axios";
+import { createIdempotencyKey } from "@/utils/idempotency";
 import type { SelectOption, SelectValue } from "tdesign-vue-next";
 
 const props = defineProps<{
   modeOptions: VideoModel;
   modeList: { value: string; label: string }[];
   trackId: number | undefined;
+  trackVersion: number | undefined;
+  projectId: number | string | undefined;
+  scriptId: number | undefined;
 }>();
 const modelParmas = defineModel<ModelSetting>({
   default: {
@@ -94,13 +98,50 @@ const modelParmas = defineModel<ModelSetting>({
     audio: false,
   },
 });
-const emit = defineEmits(["modeChange"]);
+const emit = defineEmits<{
+  modeChange: [value: string];
+  durationUpdated: [value: { trackId: number; version: number }];
+}>();
+const durationIntent = ref<{ signature: string; key: string }>();
+const durationConflict = ref<{ trackId: number; version: number }>();
 function handleBeforeChange(newVal: SelectValue<SelectOption>) {
   if (typeof newVal === "string") emit("modeChange", newVal);
 }
-function updateDuration(newDuration: number) {
+async function updateDuration(newDuration: number) {
+  if (modelParmas.value.duration === newDuration && !durationIntent.value) return;
   modelParmas.value.duration = newDuration;
-  if (props.trackId) axios.post("/production/workbench/updateVideoDuration", { id: props.trackId, duration: newDuration });
+  if (!props.trackId) return;
+  if (!Number.isSafeInteger(props.trackVersion) || props.trackVersion! < 0) {
+    window.$message.error("轨道版本尚未加载，请刷新后重试");
+    return;
+  }
+  if (durationConflict.value?.trackId === props.trackId && durationConflict.value.version === props.trackVersion) {
+    window.$message.error("轨道版本已冲突，已保留当前时长，请先刷新");
+    return;
+  }
+  const payload = {
+    id: props.trackId,
+    projectId: props.projectId,
+    scriptId: props.scriptId,
+    duration: newDuration,
+    expectedVersion: props.trackVersion,
+  };
+  const signature = JSON.stringify(payload);
+  if (durationIntent.value?.signature !== signature) durationIntent.value = { signature, key: createIdempotencyKey("track-duration") };
+  try {
+    const response: any = await axios.post("/production/workbench/updateVideoDuration", { ...payload, idempotencyKey: durationIntent.value.key });
+    emit("durationUpdated", { trackId: props.trackId, version: Number(response.version) });
+    durationConflict.value = undefined;
+    durationIntent.value = undefined;
+  } catch (error: any) {
+    const status = Number(error?.status);
+    if (status === 409) {
+      durationConflict.value = { trackId: props.trackId, version: props.trackVersion! };
+      window.$message.error("轨道已被其他成员修改，已保留当前时长，请刷新后再确认");
+    }
+    else window.$message.error(error?.message ?? "轨道时长保存失败");
+    if (Number.isSafeInteger(status) && status < 500) durationIntent.value = undefined;
+  }
 }
 </script>
 

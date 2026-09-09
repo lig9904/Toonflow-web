@@ -91,6 +91,7 @@ import { ref, computed } from "vue";
 import settingStore from "@/stores/setting";
 const { otherSetting } = storeToRefs(settingStore());
 import axios from "@/utils/axios";
+import { createIdempotencyKey } from "@/utils/idempotency";
 import projectStore from "@/stores/project";
 import type { TableProps } from "tdesign-vue-next";
 
@@ -137,6 +138,7 @@ interface AssetItem {
   describe?: string;
   filePath?: string;
   remark?: string;
+  version?: number;
 }
 
 const tableData = ref<AssetItem[]>([]);
@@ -263,11 +265,14 @@ async function onConfirm() {
     await processBatch(selectedAssets, async (item) => {
       await axios.post("/assets/updateAssets", {
         id: item.id,
+        projectId: Number(project.value?.id),
+        expectedVersion: item.version,
         name: item.name,
         describe: item.describe ?? "",
         type: item.type,
         remark: item.remark ?? "",
         prompt: item.prompt,
+        idempotencyKey: createIdempotencyKey("asset-batch-update"),
       });
       if (item.filePath) {
         await axios.post("/assets/saveAssets", {
@@ -276,6 +281,8 @@ async function onConfirm() {
           filePath: item.filePath,
           prompt: item.prompt,
           projectId: project.value!.id,
+          expectedVersion: item.version,
+          idempotencyKey: createIdempotencyKey("asset-batch-image"),
         });
       }
     });

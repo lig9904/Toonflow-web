@@ -52,6 +52,8 @@
 import axios from "@/utils/axios";
 import openAssetsSelector from "@/utils/assetsCheck";
 import settingStore from "@/stores/setting";
+import { createIdempotencyKey } from "@/utils/idempotency";
+import projectStore from "@/stores/project";
 const { otherSetting } = storeToRefs(settingStore());
 interface ScriptAsset {
   id: number;
@@ -62,6 +64,7 @@ interface ScriptItem {
   name: string;
   content: string;
   relatedAssets?: ScriptAsset[];
+  version?: number;
 }
 
 const detailsShow = defineModel<boolean>({
@@ -70,15 +73,21 @@ const detailsShow = defineModel<boolean>({
 
 const props = defineProps<{
   item: ScriptItem;
+  workspaceVersion?: number;
 }>();
+const { project } = storeToRefs(projectStore());
 
 // ============== Assets ==============
 const selectedAssets = ref<ScriptAsset[]>([]);
+const assetsTouched = ref(false);
+const mutationKey = ref("");
+const capturedWorkspaceVersion = ref<number | undefined>(undefined);
 
 watch(
   () => props.item?.relatedAssets,
   (relatedAssets) => {
     selectedAssets.value = relatedAssets?.map((a) => ({ id: a.id, name: a.name })) ?? [];
+    assetsTouched.value = false;
   },
   { immediate: true },
 );
@@ -86,6 +95,7 @@ watch(
 async function handleSelectAssets() {
   const assets = await openAssetsSelector({ title: $t("workbench.script.edit.msg.selectAssetsTitle"), types: ["role", "tool", "scene"] });
   if (assets.length) {
+    assetsTouched.value = true;
     const existing = new Set(selectedAssets.value.map((a) => a.id));
     for (const a of assets) {
       if (!existing.has(a.id)) {
@@ -96,6 +106,7 @@ async function handleSelectAssets() {
 }
 
 function removeAsset(id: number) {
+  assetsTouched.value = true;
   selectedAssets.value = selectedAssets.value.filter((a) => a.id !== id);
 }
 
@@ -103,14 +114,20 @@ const emit = defineEmits(["searchScripts"]);
 //确认
 async function onConfirm() {
   try {
+    if (!mutationKey.value) mutationKey.value = createIdempotencyKey("script-edit");
     await axios.post("/script/updateScript", {
       id: props.item.id,
+      projectId: project.value?.id == null ? undefined : Number(project.value.id),
       name: props.item.name,
       content: props.item.content,
-      assets: selectedAssets.value.map((a) => a.id),
+      expectedVersion: props.item.version,
+      workspaceExpectedVersion: capturedWorkspaceVersion.value,
+      mutationKey: mutationKey.value,
+      ...(assetsTouched.value ? { assets: selectedAssets.value.map((a) => a.id) } : {}),
     });
     emit("searchScripts");
     detailsShow.value = false;
+    mutationKey.value = "";
 
     window.$message.success($t("workbench.script.edit.msg.updateSuccess"));
   } catch (error) {
@@ -118,6 +135,17 @@ async function onConfirm() {
   } finally {
   }
 }
+
+watch(detailsShow, (visible) => {
+  if (visible) {
+    mutationKey.value = createIdempotencyKey("script-edit");
+    capturedWorkspaceVersion.value = props.workspaceVersion;
+    assetsTouched.value = false;
+  } else {
+    mutationKey.value = "";
+    capturedWorkspaceVersion.value = undefined;
+  }
+});
 </script>
 
 <style lang="scss" scoped>

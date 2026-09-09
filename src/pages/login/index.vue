@@ -48,6 +48,7 @@ import Router from "@/router/index.ts";
 import logo from "@/assets/logo.png";
 import axios from "@/utils/axios";
 import settingStore from "@/stores/setting";
+import userStore from "@/stores/user";
 import { storeToRefs } from "pinia";
 import { languageList, cachedLocale } from "@/locales";
 
@@ -96,9 +97,11 @@ const handleLogin = () => {
   const obj = { ...state.value.user };
   axios
     .post("/login/login", obj)
-    .then(({ data }) => {
-      localStorage.setItem("token", data.token);
-      localStorage.setItem("userId", data.id);
+    .then((response) => {
+      const value = response?.data ?? response;
+      const data = value?.user ? { authenticated: true, ...value.user } : value;
+      if (!data?.authenticated || data.id == null || !data.name) throw new Error("登录响应无效");
+      userStore().setSession({ authenticated: true, id: data.id, name: data.name, role: data.role ?? "viewer" });
       Router.push("/project");
       window.$message.success($t("login.loginSuccess"));
       state.value.loginLoading = false;

@@ -26,7 +26,10 @@
 
 <script setup lang="ts">
 import axios from "@/utils/axios";
+import { createIdempotencyKey } from "@/utils/idempotency";
+import projectStore from "@/stores/project";
 const editNodelShow = defineModel<boolean>();
+const { project } = storeToRefs(projectStore());
 const props = defineProps<{
   formData: {
     id: number;
@@ -35,29 +38,37 @@ const props = defineProps<{
     chapter: string;
     chapterData: string;
     event: string;
+    version?: number;
   };
 }>();
 const emit = defineEmits(["select"]);
+const mutationKey = ref("");
+
+watch(editNodelShow, (visible) => {
+  if (visible) mutationKey.value = createIdempotencyKey("novel-edit");
+  else mutationKey.value = "";
+});
 
 async function saveChanges() {
-  console.log("保存的章节数据:", props.formData);
   try {
     await axios.post("/novel/updateNovel", {
+      projectId: project.value?.id == null ? undefined : Number(project.value.id),
       id: props.formData.id,
       index: props.formData.index,
       reel: props.formData.reel,
       chapter: props.formData.chapter,
       chapterData: props.formData.chapterData,
       event: props.formData.event,
+      expectedVersion: props.formData.version,
+      mutationKey: mutationKey.value,
     });
     emit("select");
     window.$message.success($t('workbench.novel.editDialog.msg.updateSuccess'));
+    editNodelShow.value = false;
   } catch (e) {
     window.$message.error((e as Error).message);
-  } finally {
-    editNodelShow.value = false;
+    return;
   }
-  editNodelShow.value = false; // 关闭对话框
 }
 </script>
 

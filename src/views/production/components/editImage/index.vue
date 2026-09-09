@@ -25,7 +25,13 @@
       </template>
 
       <template #node-generated="{ id, data }">
-        <generatedNode :id="id" :data="data" :projectId="+project!.id" @keep="sureNode" />
+        <generatedNode
+          :id="id"
+          :data="data"
+          :projectId="Number(project!.id)"
+          :scriptId="Number(episodesId)"
+          :flowId="activeFlowId"
+          @keep="sureNode" />
       </template>
       <template #edge-removeLine="edgeProps">
         <removeLine v-bind="edgeProps" />
@@ -80,6 +86,7 @@ import type { NodeType, UploadNodeData, GeneratedNodeData } from "../../utils/ed
 import { DEFAULT_EDGE_OPTIONS, createGeneratedData, cleanNodes, cleanEdges } from "../../utils/editImageType";
 import { useLayout } from "../../utils/dagre";
 import { v4 as uuid } from "uuid";
+import { createIdempotencyKey } from "@/utils/idempotency";
 
 const episodesId = inject<Ref<number>>("episodesId");
 const { project } = storeToRefs(projectStore());
@@ -120,6 +127,24 @@ const { addEdges, getNodes, getEdges, updateNodeData } = useVueFlow("editImage")
 
 const nodes = ref<NodeType[]>([]);
 const edges = ref<Edge<any, any, string>[]>([]);
+const activeFlowId = ref<number | null>(props.flowData.flowId ?? null);
+const flowVersion = ref(0);
+const mutationKeys = new Map<string, string>();
+
+function flowScope() {
+  const projectId = Number(project.value?.id);
+  const scriptId = Number(episodesId?.value);
+  if (!Number.isSafeInteger(projectId) || projectId <= 0 || !Number.isSafeInteger(scriptId) || scriptId <= 0) {
+    throw new Error("项目或剧集上下文无效");
+  }
+  return { projectId, scriptId };
+}
+
+function mutationKey(action: string, payload: unknown) {
+  const identity = `${action}:${JSON.stringify(payload)}`;
+  if (!mutationKeys.has(identity)) mutationKeys.set(identity, createIdempotencyKey(`image-flow-${action}`));
+  return mutationKeys.get(identity)!;
+}
 
 // 防抖定时器
 let syncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -232,21 +257,28 @@ const addUploadNode = (type: string, image: string = "", prompt: string = "") =>
 
   return newNodeId;
 };
+async function persistFlow() {
+  _doSyncReferences();
+  const document = { nodes: cleanNodes(getNodes.value as NodeType[]), edges: cleanEdges(getEdges.value) };
+  const scope = flowScope();
+  if (activeFlowId.value != null) {
+    const body = { ...document, ...scope, flowId: activeFlowId.value, expectedVersion: flowVersion.value };
+    const { data } = await axios.post("/production/editImage/updateImageFlow", { ...body, idempotencyKey: mutationKey("update", body) });
+    flowVersion.value = Number(data.version);
+    return activeFlowId.value;
+  }
+  const body = { ...document, ...scope, expectedVersion: 0 as const };
+  const { data } = await axios.post("/production/editImage/saveImageFlow", { ...body, idempotencyKey: mutationKey("create", body) });
+  activeFlowId.value = Number(data.flowId ?? data.id);
+  flowVersion.value = Number(data.version);
+  return activeFlowId.value;
+}
+
 //保存节点
 async function sureNode(imageUrl: string) {
   try {
-    const payload = {
-      nodes: cleanNodes(getNodes.value as NodeType[]),
-      edges: cleanEdges(getEdges.value),
-    };
-
-    if (props.flowData.flowId) {
-      await axios.post("/production/editImage/updateImageFlow", { ...payload, flowId: props.flowData.flowId });
-      emit("save", { imageUrl, flowId: props.flowData.flowId });
-    } else {
-      const { data } = await axios.post("/production/editImage/saveImageFlow", { ...payload });
-      emit("save", { imageUrl, flowId: data?.id });
-    }
+    const flowId = await persistFlow();
+    emit("save", { imageUrl, flowId });
     visible.value = false;
   } catch (e) {
     window.$message.error((e as any).message || $t("workbench.production.editImage.saveFailed"));
@@ -254,11 +286,14 @@ async function sureNode(imageUrl: string) {
 }
 onMounted(async () => {
   try {
-    if (!props.flowData.flowId) return buildFlow();
+    if (!activeFlowId.value) return buildFlow();
+    const scope = flowScope();
     const { data } = await axios.post("/production/editImage/getImageFlow", {
-      id: props.flowData.flowId,
+      id: activeFlowId.value,
+      ...scope,
     });
     if (!data) return buildFlow();
+    flowVersion.value = Number(data.version ?? 0);
     edges.value = data.edges.map((e: any) => ({ ...e, ...DEFAULT_EDGE_OPTIONS }));
     nodes.value = data.nodes;
     await nextTick();
@@ -300,17 +335,14 @@ function closeFn() {
     body: $t("workbench.production.editImage.closeConfirmBody"),
     confirmBtn: $t("common.confirm"),
     cancelBtn: $t("common.cancel"),
-    onConfirm: () => {
-      if (props.flowData.flowId) {
-        const payload = {
-          flowId: props.flowData.flowId,
-          nodes: cleanNodes(getNodes.value as NodeType[]),
-          edges: cleanEdges(getEdges.value),
-        };
-        axios.post("/production/editImage/updateImageFlow", { ...payload });
+    onConfirm: async () => {
+      try {
+        if (activeFlowId.value) await persistFlow();
+        visible.value = false;
+        dialog.destroy();
+      } catch (e) {
+        window.$message.error((e as any).message || $t("workbench.production.editImage.saveFailed"));
       }
-      visible.value = false;
-      dialog.destroy();
     },
   });
 }

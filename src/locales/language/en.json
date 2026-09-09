@@ -48,6 +48,7 @@
       "language": "Language",
       "vendorConfig": "Model Providers",
       "agentConfig": "Agent Config",
+      "teamMembers": "Team Members",
       "promptManage": "Prompt Management",
       "skillManagement": "skillsSkillsManagement",
       "memoryConfig": "Agent Memory",

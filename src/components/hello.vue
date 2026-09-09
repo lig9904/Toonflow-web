@@ -101,6 +101,7 @@ import { useLocalStorage } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
 import JSConfetti from "js-confetti";
 import settingStore from "@/stores/setting";
+import userStore from "@/stores/user";
 import { languageList, cachedLocale } from "@/locales";
 const { showSetting, activeMenu, isElectron } = storeToRefs(settingStore());
 
@@ -115,7 +116,9 @@ const handleChangeLang = (data: any) => {
 };
 
 const guideDone = useLocalStorage("helloGuideDone", false);
-const show = ref(!guideDone.value);
+// Provider setup is an administrator task. Team editors and viewers can start
+// working immediately even when this browser has no local guide marker yet.
+const show = ref(!guideDone.value && userStore().user?.role === "admin");
 const currentStep = ref(0);
 
 function openVendorConfig() {

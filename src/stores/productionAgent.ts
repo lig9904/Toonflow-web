@@ -11,6 +11,8 @@ import {
 } from "@/utils/productionState";
 import type { ChatMessagesData } from "@tdesign-vue-next/chat";
 import { useThrottleFn } from "@vueuse/core";
+import builtinAgentStore from "@/stores/builtinAgent";
+import type { BuiltinRunLimits } from "@/types/builtinAgent";
 
 function makeProductionAgentStore(projectId: string) {
   return defineStore(`productionAgent-${projectId}`, () => {
@@ -47,6 +49,7 @@ function makeProductionAgentStore(projectId: string) {
     const planningVersion = ref<number>();
     const planningEpisodeId = ref<number>();
     const storyboardEditingIds = ref<number[]>([]);
+    const builtinRuns = builtinAgentStore();
     let flowLoadSequence = 0;
     type PendingFlowSave = { scriptId: number; expectedPlanningVersion: number; loadSequence: number; snapshot: FlowData };
     let pendingFlowSave: PendingFlowSave | null = null;
@@ -386,6 +389,13 @@ function makeProductionAgentStore(projectId: string) {
       }
     }
 
+    watch(
+      () => builtinRuns.artifactRevision({ agentType: "productionAgent", projectId: Number(projectId), scriptId: episodesId.value ?? null }),
+      (revision, previousRevision) => {
+        if (revision !== previousRevision && revision > 0 && episodesId.value != null) void refreshStoryboardWorkflow(episodesId.value);
+      },
+    );
+
     function setStoryboardEditing(id: number, editing: boolean) {
       if (editing) {
         if (!storyboardEditingIds.value.includes(id)) storyboardEditingIds.value.push(id);
@@ -685,6 +695,10 @@ function makeProductionAgentStore(projectId: string) {
       }
     }
 
+    async function startBuiltinRun(prompt: string, limits?: Partial<BuiltinRunLimits>) {
+      return builtinRuns.startRun({ agentType: "productionAgent", projectId: Number(projectId), scriptId: episodesId.value ?? null, prompt, limits });
+    }
+
     return {
       connected,
       messages,
@@ -708,6 +722,7 @@ function makeProductionAgentStore(projectId: string) {
       reconnect,
       thinkLevel,
       updateThinkConfig,
+      startBuiltinRun,
     };
   });
 }

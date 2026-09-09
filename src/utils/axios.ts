@@ -3,17 +3,20 @@ import router from "@/router/index";
 import { storeToRefs } from "pinia";
 import { MessagePlugin, NotifyPlugin, type TNode } from "tdesign-vue-next";
 import settingStore from "@/stores/setting";
+import userStore from "@/stores/user";
 import { h } from "vue";
+import { isLegacyExchangePath } from "@/utils/sessionContract";
 const instance = axios.create();
 
 instance.interceptors.request.use(function (config) {
   const { baseUrl, otherSetting } = storeToRefs(settingStore());
   config.baseURL = baseUrl.value;
   config.timeout = otherSetting.value.axiosTimeOut;
-  const token = localStorage.getItem("token");
-  if (token) {
-    config.headers.Authorization = token;
-  }
+  config.withCredentials = true;
+  const requestPath = String(config.url ?? "").split("?")[0];
+  const legacyToken = localStorage.getItem("token");
+  // Legacy bearer migration is the sole request allowed to carry the old token.
+  if (legacyToken && isLegacyExchangePath(requestPath)) config.headers.Authorization = legacyToken;
 
   return config;
 });
@@ -24,10 +27,15 @@ instance.interceptors.response.use(
   },
   function (error) {
     const httpStatus = error?.status ?? error?.response?.status;
-    if (httpStatus === 401) {
-      localStorage.removeItem("token");
-      router.push("/login");
-      MessagePlugin.error(window.$t("common.sessionExpired"));
+    if (httpStatus === 401 || ["USER_DISABLED", "SESSION_REVOKED", "SESSION_INVALID"].includes(error?.response?.data?.code)) {
+      const requestPath = String(error?.config?.url ?? "").split("?")[0];
+      const isExchange = isLegacyExchangePath(requestPath);
+      // A legacy token is deleted only by a successful exchange or explicit logout.
+      userStore().clearSession({ removeLegacyToken: false, reason: isExchange ? "exchange-failed" : "expired" });
+      if (!isExchange && router.currentRoute.value.path !== "/login") {
+        router.push("/login");
+        MessagePlugin.error(window.$t("common.sessionExpired"));
+      }
     }
     if (error?.message?.includes("Network Error") || error?.response?.data?.message === "Network Error") {
       NotifyPlugin.error({

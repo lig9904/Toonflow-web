@@ -61,15 +61,15 @@
             </div>
 
             <div class="del">
-              <i-delete theme="outline" size="18" @click.stop="handleDeleteScript(item.id)" style="cursor: pointer" />
+              <i-delete theme="outline" size="18" @click.stop="handleDeleteScript(item)" style="cursor: pointer" />
             </div>
           </t-card>
         </div>
       </div>
     </div>
-    <editScript v-model="detailsShow" :item="selectedScript" @searchScripts="searchScripts" />
-    <addScript v-model="addScriptShow" @searchScripts="searchScripts" />
-    <batchAddScript v-model="batchScriptShow" @select="searchScripts" />
+    <editScript v-model="detailsShow" :item="selectedScript" :workspace-version="workspaceVersion" @searchScripts="searchScripts" />
+    <addScript v-model="addScriptShow" :workspace-version="workspaceVersion" @searchScripts="searchScripts" />
+    <batchAddScript v-model="batchScriptShow" :workspace-version="workspaceVersion" @select="searchScripts" />
   </div>
 </template>
 
@@ -81,6 +81,7 @@ import batchAddScript from "./components/batchAddScript.vue";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
 import imageListCacheStore from "@/stores/imageListCache";
+import { createIdempotencyKey } from "@/utils/idempotency";
 
 const { clearScriptCache } = imageListCacheStore();
 
@@ -101,8 +102,11 @@ interface Script {
   extractState?: -1 | 0 | 1 | 2; // -1 失败 0 正在提取 1 成功 等待提取
   errorReason?: string;
   relatedAssets?: ScriptAsset[];
+  version?: number;
+  assets?: number[];
 }
 const scripts = ref<Script[]>([]);
+const workspaceVersion = ref<number | undefined>(undefined);
 const searchQuery = ref("");
 const addScriptShow = ref(false);
 const selectedIds = ref<number[]>([]);
@@ -132,7 +136,9 @@ async function searchScripts() {
       projectId: project.value?.id,
       name: searchQuery.value,
     });
-    scripts.value = res.data;
+    scripts.value = Array.isArray(res.data) ? res.data : [];
+    const nextWorkspaceVersion = Number((res as any).workspaceVersion);
+    workspaceVersion.value = Number.isFinite(nextWorkspaceVersion) ? nextWorkspaceVersion : workspaceVersion.value;
   } catch (error) {
     console.error("搜索剧本失败:", error);
     window.$message.error($t("workbench.script.msg.searchFailed"));
@@ -185,7 +191,12 @@ function handleScriptClick(item: Script) {
   detailsShow.value = true;
 }
 // 删除剧本
-async function handleDeleteScript(scriptId: number) {
+async function handleDeleteScript(script: Script) {
+  if (!Number.isSafeInteger(script.version) || !Number.isSafeInteger(workspaceVersion.value)) {
+    window.$message.error("剧本版本尚未加载，请刷新后重试");
+    return searchScripts();
+  }
+  const scriptId = script.id;
   //判断是否有资产正在提取中
   const dialog = DialogPlugin.confirm({
     header: $t("workbench.script.msg.deleteHeader"),
@@ -195,7 +206,13 @@ async function handleDeleteScript(scriptId: number) {
     theme: "warning",
     onConfirm: async () => {
       try {
-        await axios.post("/script/delScript", { ids: [scriptId] });
+        await axios.post("/script/delScript", {
+          projectId: Number(project.value?.id),
+          ids: [scriptId],
+          versions: [{ id: scriptId, expectedVersion: Number(script.version) }],
+          workspaceExpectedVersion: Number(workspaceVersion.value),
+          idempotencyKey: createIdempotencyKey("script-delete"),
+        });
         window.$message.success($t("workbench.script.msg.deleteSuccess"));
         clearScriptCache(project.value!.id, scriptId);
         searchScripts();
@@ -243,6 +260,11 @@ async function handleBatchDelete() {
   if (selectedIds.value.some((id) => extractingIds.has(id))) {
     return window.$message.error($t("workbench.script.msg.extractingInProgress"));
   }
+  const selected = scripts.value.filter((script) => selectedIds.value.includes(script.id));
+  if (selected.length !== selectedIds.value.length || selected.some((script) => !Number.isSafeInteger(script.version)) || !Number.isSafeInteger(workspaceVersion.value)) {
+    window.$message.error("剧本版本尚未加载，请刷新后重试");
+    return searchScripts();
+  }
   const dialog = DialogPlugin.confirm({
     header: $t("workbench.script.msg.batchDeleteHeader"),
     body: $t("workbench.script.msg.batchDeleteBody", { count: selectedIds.value.length }),
@@ -251,7 +273,13 @@ async function handleBatchDelete() {
     theme: "warning",
     onConfirm: async () => {
       try {
-        await axios.post("/script/delScript", { ids: selectedIds.value });
+        await axios.post("/script/delScript", {
+          projectId: Number(project.value?.id),
+          ids: selectedIds.value,
+          versions: selected.map((script) => ({ id: script.id, expectedVersion: Number(script.version) })),
+          workspaceExpectedVersion: Number(workspaceVersion.value),
+          idempotencyKey: createIdempotencyKey("script-delete"),
+        });
         window.$message.success($t("workbench.script.msg.batchDeleteSuccess"));
         for (const item of selectedIds.value) {
           clearScriptCache(project.value!.id, item);

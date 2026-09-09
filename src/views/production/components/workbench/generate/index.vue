@@ -6,7 +6,16 @@
       </div>
     </div>
     <div class="modelSelect">
-      <modeMenu v-model="modelParmas" :modeOptions="modeOptions" :trackId="currentTrack?.id" :modeList="modeList" @modeChange="modeChange" />
+      <modeMenu
+        v-model="modelParmas"
+        :modeOptions="modeOptions"
+        :trackId="currentTrack?.id"
+        :trackVersion="currentTrack?.version"
+        :projectId="project?.id"
+        :scriptId="episodesId"
+        :modeList="modeList"
+        @modeChange="modeChange"
+        @durationUpdated="handleDurationUpdated" />
     </div>
     <div class="generate ac">
       <div class="prompt" v-if="currentTrack">
@@ -57,6 +66,7 @@ import projectStore from "@/stores/project";
 import promptEditor from "@/components/promptEditor.vue";
 import imageListCacheStore from "@/stores/imageListCache";
 import { createGenerationIntentStore } from "@/utils/generationIntent";
+import { createIdempotencyKey } from "@/utils/idempotency";
 
 const { project } = storeToRefs(projectStore());
 const episodesId = inject<Ref<number>>("episodesId")!;
@@ -64,6 +74,9 @@ const activeTrackIndex = ref(0);
 const cacheStore = imageListCacheStore();
 const generationIntents = createGenerationIntentStore<{ videoId: number }>();
 const generateVideoPending = ref(false);
+const promptMutationIntents = new Map<number, { signature: string; key: string }>();
+const persistedTrackPrompts = new Map<number, string>();
+const promptConflictVersions = new Map<number, number>();
 const { getCache, setCache, removeCache, initCacheFromTrackList, warmUpUrls } = cacheStore;
 const { urlMap } = storeToRefs(cacheStore);
 
@@ -289,15 +302,58 @@ async function getGenerateData() {
     });
     // 整体赋值触发响应式
     trackList.value = [...data.trackList];
+    persistedTrackPrompts.clear();
+    promptConflictVersions.clear();
+    trackList.value.forEach((track) => persistedTrackPrompts.set(track.id, track.prompt ?? ""));
   }
 
   modelParmas.value.duration = clampDuration(data.trackList?.[activeTrackIndex.value]?.duration);
 }
 /** 提示词失焦时保存到后端 */
-function handlePromptBlur() {
-  const trackId = trackList.value[activeTrackIndex.value]?.id;
-  if (trackId == null) return;
-  axios.post("/production/workbench/updateVideoPrompt", { id: trackId, prompt: currentTrack.value?.prompt });
+function handleDurationUpdated(update: { trackId: number; version: number }) {
+  const track = trackList.value.find((item) => item.id === update.trackId);
+  if (track && Number.isSafeInteger(update.version)) track.version = update.version;
+}
+
+async function handlePromptBlur() {
+  const track = trackList.value[activeTrackIndex.value];
+  if (track?.id == null) return;
+  if (!Number.isSafeInteger(track.version) || track.version! < 0) {
+    window.$message.error("轨道版本尚未加载，请刷新后重试");
+    return;
+  }
+  const prompt = track.prompt ?? "";
+  if (persistedTrackPrompts.get(track.id) === prompt && !promptMutationIntents.has(track.id)) return;
+  if (promptConflictVersions.get(track.id) === track.version) {
+    window.$message.error("轨道版本已冲突，已保留当前提示词，请先刷新");
+    return;
+  }
+  const payload = {
+    id: track.id,
+    projectId: project.value?.id,
+    scriptId: episodesId.value,
+    prompt,
+    expectedVersion: track.version,
+  };
+  const signature = JSON.stringify(payload);
+  const previous = promptMutationIntents.get(track.id);
+  const intent = previous?.signature === signature ? previous : { signature, key: createIdempotencyKey("track-prompt") };
+  promptMutationIntents.set(track.id, intent);
+  try {
+    const response: any = await axios.post("/production/workbench/updateVideoPrompt", { ...payload, idempotencyKey: intent.key });
+    if (track.version === payload.expectedVersion && Number.isSafeInteger(Number(response.version))) track.version = Number(response.version);
+    persistedTrackPrompts.set(track.id, prompt);
+    promptConflictVersions.delete(track.id);
+    promptMutationIntents.delete(track.id);
+  } catch (error: any) {
+    const status = Number(error?.status);
+    if (status === 409) {
+      promptConflictVersions.set(track.id, Number(payload.expectedVersion));
+      window.$message.error("轨道已被其他成员修改，已保留当前提示词，请刷新后再确认");
+    }
+    else window.$message.error(error?.message ?? "轨道提示词保存失败");
+    if (Number.isSafeInteger(status) && status < 500) promptMutationIntents.delete(track.id);
+  }
 }
 
 /** 单个轨道生成提示词 */

@@ -442,6 +442,7 @@ import addAudioAssets from "./components/addAudioAssets.vue";
 import generateImage from "./components/generateImage.vue";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const { otherSetting } = storeToRefs(settingStore());
 
 const props = withDefaults(
@@ -543,6 +544,7 @@ interface Asset {
   imageId: number;
   promptState: string;
   filePath: string;
+  version?: number;
 }
 const tableData = ref<Asset[]>([]);
 // 分页配置
@@ -609,7 +611,7 @@ function selectAssetOptions(value: TabValue) {
   pagination.value.page = 1;
   loadCurrentTabData();
 }
-const formData = ref<{ id: number; name: string; describe: string; remark: string; src?: string; prompt: string }>({
+const formData = ref<{ id: number; name: string; describe: string; remark: string; src?: string; prompt: string; version?: number }>({
   id: 0,
   name: "",
   describe: "",
@@ -636,9 +638,10 @@ async function handleAdd(type: string) {
     reader.onload = async (e) => {
       const base64 = reader.result as string;
       await axios.post("/assets/uploadClip", {
-        projectId: project.value?.id,
+        projectId: Number(project.value?.id),
         base64Data: base64,
         name: file.name,
+        idempotencyKey: createIdempotencyKey("clip-upload"),
       });
       window.$message.success($t("workbench.assets.uploadSuccess"));
       getFilteredData(assetOptions.value);
@@ -820,7 +823,12 @@ function handleBatchDelete() {
     cancelBtn: $t("workbench.assets.cancelBtn"),
     theme: "warning",
     onConfirm: async () => {
-      await axios.post("/assets/batchDelete", { id: selectedAssets.map((asset) => asset.id) });
+        await axios.post("/assets/batchDelete", {
+          projectId: Number(project.value?.id),
+          ids: selectedAssets.map((asset) => asset.id),
+          expectedVersions: Object.fromEntries(selectedAssets.map((asset) => [String(asset.id), asset.version ?? 0])),
+          idempotencyKey: createIdempotencyKey("asset-batch-delete"),
+        });
       window.$message.success($t("workbench.assets.deleteSuccess"));
       getFilteredData(assetOptions.value);
       dialog.destroy();
@@ -1096,6 +1104,7 @@ const currentAssetData = ref<{
   type?: string;
   prompt?: string;
   src: string;
+  version?: number;
 }>({
   id: undefined,
   name: "",
@@ -1112,6 +1121,7 @@ function generate(row: any) {
     type: row.type,
     prompt: row.prompt,
     src: row.src,
+    version: row.version,
   };
   generateImageShow.value = true;
 }
@@ -1140,7 +1150,12 @@ function handleDelete(row: any) {
     theme: "warning",
     onConfirm: async () => {
       try {
-        await axios.post("/assets/delAssets", { id: row.id });
+        await axios.post("/assets/delAssets", {
+          id: row.id,
+          projectId: Number(project.value?.id),
+          expectedVersion: row.version,
+          idempotencyKey: createIdempotencyKey("asset-delete"),
+        });
         window.$message.success($t("workbench.assets.deleteSuccess"));
         getFilteredData(assetOptions.value);
         dialog.destroy();

@@ -77,7 +77,6 @@
 
 <script setup lang="ts">
 import { Handle, useVueFlow, Position } from "@vue-flow/core";
-import type { Ref } from "vue";
 import modelSelect from "@/components/modelSelect.vue";
 import PromptEditor from "@/components/promptEditor.vue";
 import axios from "@/utils/axios";
@@ -87,14 +86,13 @@ import type { Storyboard } from "../../utils/flowBuilder";
 import openAssetsSelector from "@/utils/assetsCheck";
 import { useFileDialog } from "@vueuse/core";
 import projectStore from "@/stores/project";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const { project } = storeToRefs(projectStore());
 const openStoryboardCheck = inject<() => Promise<Storyboard[]>>("openStoryboardCheck")!;
 const { open, onChange, onCancel } = useFileDialog({ multiple: false, reset: true, accept: ".png,.jpg,.jpeg" });
 
 const selected = ref(true);
 const generating = ref(false);
-const episodesId = inject<Ref<number>>("episodesId")!;
-
 const emit = defineEmits(["keep"]);
 const { removeNodes } = useVueFlow("editImage");
 
@@ -112,7 +110,16 @@ const props = defineProps<{
   id: string;
   data: GeneratedNodeData;
   projectId: number;
+  scriptId: number;
+  flowId?: number | null;
 }>();
+
+const mutationKeys = new Map<string, string>();
+function mutationKey(action: string, payload: unknown) {
+  const identity = `${action}:${JSON.stringify(payload)}`;
+  if (!mutationKeys.has(identity)) mutationKeys.set(identity, createIdempotencyKey(`image-flow-${action}`));
+  return mutationKeys.get(identity)!;
+}
 
 function selectedFn() {
   selected.value = !selected.value;
@@ -141,12 +148,13 @@ async function lensImage() {
   reader.onload = async () => {
     const base64 = reader.result as string;
     try {
-      const { data } = await axios.post("/production/editImage/uploadImage", {
+      const body = {
         base64Data: base64,
         projectId: props.projectId,
-        scriptId: episodesId.value,
-      });
-      props.data.generatedImage = data;
+        scriptId: props.scriptId,
+      };
+      const { data } = await axios.post("/production/editImage/uploadImage", { ...body, idempotencyKey: mutationKey("upload", body) });
+      props.data.generatedImage = data.url;
     } catch (e) {
       return window.$message.error((e as any)?.message || $t("workbench.production.editImage.uploadFailed"));
     }
@@ -178,14 +186,18 @@ async function handleGenerate() {
   if (!props.data.ratio) return window.$message.error($t("workbench.production.editImage.selectRatio"));
   generating.value = true;
   try {
-    const { data } = await axios.post("/production/editImage/generateFlowImage", {
+    const body = {
       references: props.data.references.map((i) => i.image).filter(Boolean),
       model: props.data.model,
       quality: props.data.quality,
       ratio: props.data.ratio,
       prompt: props.data.prompt,
       projectId: props.projectId,
-    });
+      scriptId: props.scriptId,
+      flowId: props.flowId ?? undefined,
+      nodeId: props.id,
+    };
+    const { data } = await axios.post("/production/editImage/generateFlowImage", { ...body, idempotencyKey: mutationKey("generate", body) });
     props.data.generatedImage = data.url;
   } catch (e) {
     return window.$message.error((e as any)?.message || $t("workbench.production.editImage.generateFailed"));
@@ -199,9 +211,9 @@ function handleKeep() {
   emit("keep", props.data.generatedImage);
 }
 onMounted(() => {
-  props.data.model = project.value?.imageModel ?? "";
-  props.data.quality = project.value?.imageQuality ?? "";
-  props.data.ratio = project.value?.videoRatio ?? "16:9";
+  if (!props.data.model) props.data.model = project.value?.imageModel ?? "";
+  if (!props.data.quality) props.data.quality = project.value?.imageQuality ?? "";
+  if (!props.data.ratio) props.data.ratio = project.value?.videoRatio ?? "16:9";
 });
 </script>
 

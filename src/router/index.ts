@@ -1,4 +1,6 @@
 import { createRouter, createWebHashHistory } from "vue-router";
+import userStore from "@/stores/user";
+import projectStore from "@/stores/project";
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
@@ -71,7 +73,12 @@ router.beforeEach((to, from, next) => {
   if (to.path === "/login") {
     next();
   } else {
-    if (localStorage.getItem("token")) {
+    if (userStore().hasSessionMarker() || localStorage.getItem("token")) {
+      if (["/scriptAgent", "/production"].includes(to.path) && !projectStore().project?.id) {
+        queueMicrotask(() => window.$message?.info("请先选择项目"));
+        next("/project");
+        return;
+      }
       next();
     } else {
       next("/login");

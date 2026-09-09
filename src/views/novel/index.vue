@@ -29,6 +29,11 @@
         </t-button>
       </div>
     </div>
+    <t-alert
+      v-if="activeEventRunId"
+      theme="info"
+      style="margin-top: 10px"
+      :message="`事件提取已启动（运行 ${activeEventRunId.slice(0, 8)}），可离开页面后稍后查看。`" />
     <t-table
       ref="tableRef"
       style="margin-top: 10px; flex: 1; display: flex; flex-direction: column"
@@ -61,6 +66,13 @@
           {{ $t("workbench.novel.genFailed") }}
         </t-button>
         <div v-else class="eventCell">
+          <t-link
+            v-if="row.eventState == -1"
+            theme="warning"
+            hover="color"
+            @click.stop="openPreview('事件需重新提取', row.errorReason)">
+            需重新提取
+          </t-link>
           <div class="eventPreview">{{ formatPreview(row.event) }}</div>
           <t-link
             v-if="row.event && row.event.length > PREVIEW_MAX_LENGTH"
@@ -115,8 +127,10 @@ import importNovel from "./components/importNovel.vue";
 import editNodel from "./components/editNodel.vue";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const { otherSetting } = storeToRefs(settingStore());
 const { project } = storeToRefs(projectStore());
+const activeEventRunId = ref("");
 
 // 搜索文本
 const searchText = ref("");
@@ -150,8 +164,9 @@ interface OriginalText {
   event: string;
   eventState?: number;
   errorReason?: string;
+  version?: number;
 }
-const formData = ref<OriginalText>({ id: -1, index: 0, reel: "", chapter: "", chapterData: "", event: "" });
+const formData = ref<OriginalText>({ id: -1, index: 0, reel: "", chapter: "", chapterData: "", event: "", version: 0 });
 const PREVIEW_MAX_LENGTH = 80;
 const previewVisible = ref(false);
 const previewTitle = ref("");
@@ -206,6 +221,7 @@ function getNovel() {
     .then((res) => {
       tableData.value = res.data.data;
       pagination.value.total = res.data.total;
+      void pollEventState(tableData.value.map((item) => item.id));
     })
     .finally(() => {
       loading.value = false;
@@ -229,12 +245,19 @@ function handleSelectChange(value: Array<string | number>, context: { selectedRo
 // 批量删除
 function handleBatchDelete() {
   if (selectedRowKeys.value.length === 0) return;
+  const selected = tableData.value.filter((row) => selectedRowKeys.value.includes(row.id));
+  if (selected.length !== selectedRowKeys.value.length || selected.some((row) => !Number.isSafeInteger(row.version) || Number(row.version) < 0)) {
+    window.$message.error("原文版本尚未加载，请刷新后重试");
+    return getNovel();
+  }
   const dialog = DialogPlugin.confirm({
     header: $t("workbench.novel.msg.batchDeleteHeader"),
     body: $t("workbench.novel.msg.batchDeleteBody", { count: selectedRowKeys.value.length }),
     onConfirm: async () => {
-      await axios.post("/novel/batchDeleteNovel", {
-        ids: selectedRowKeys.value,
+      await axios.post("/novel/delNovel", {
+        projectId: Number(project.value?.id),
+        items: selected.map((row) => ({ id: row.id, expectedVersion: Number(row.version) })),
+        idempotencyKey: createIdempotencyKey("novel-delete"),
       });
       getNovel();
       window.$message.success($t("workbench.novel.msg.batchDeleteSuccess"));
@@ -249,12 +272,21 @@ function handleEdit(row: OriginalText) {
 }
 // 删除
 function handleDelete(row: OriginalText) {
+  if (!Number.isSafeInteger(row.version) || Number(row.version) < 0) {
+    window.$message.error("原文版本尚未加载，请刷新后重试");
+    return getNovel();
+  }
   const dialog = DialogPlugin.confirm({
     header: $t("workbench.novel.msg.deleteHeader"),
     body: $t("workbench.novel.msg.deleteBody", { name: row.chapter }),
     onConfirm: async () => {
       try {
-        await axios.post("/novel/delNovel", { id: row.id });
+        await axios.post("/novel/delNovel", {
+          id: row.id,
+          projectId: Number(project.value?.id),
+          expectedVersion: Number(row.version),
+          idempotencyKey: createIdempotencyKey("novel-delete"),
+        });
         window.$message.success($t("workbench.novel.msg.deleteSuccess"));
         if (tableData.value.length === 1 && pagination.value.page > 1) {
           pagination.value.page -= 1;
@@ -263,7 +295,6 @@ function handleDelete(row: OriginalText) {
       } catch (e) {
         window.$message.error((e as Error).message);
       }
-      window.$message.success($t("workbench.novel.msg.deleteSuccess"));
       dialog.destroy();
     },
   });
@@ -273,40 +304,50 @@ function startEventAnalysis() {
   const dialog = DialogPlugin.confirm({
     header: $t("workbench.novel.msg.eventAnalysisHeader"),
     body: $t("workbench.novel.msg.eventAnalysisBody", { count: selectedRowKeys.value.length }),
-    onConfirm: () => {
+    onConfirm: async () => {
       dialog.destroy();
-      axios
-        .post("/novel/event/generateEvents", {
+      const selected = tableData.value.filter((row) => selectedRowKeys.value.includes(row.id));
+      if (selected.length !== selectedRowKeys.value.length || selected.some((row) => !Number.isSafeInteger(row.version))) {
+        window.$message.error("原文版本尚未加载，请刷新后重试");
+        return getNovel();
+      }
+      try {
+        const { data } = await axios.post("/novel/event/generateEvents", {
           projectId: project.value?.id!,
-          novelIds: selectedRowKeys.value,
-          concurrentCount: otherSetting.value.assetsBatchGenereateSize,
-        })
-        .then((res) => {
-          selectedRowKeys.value.length = 0;
-          getNovel();
+          novelIds: selected.map((row) => row.id),
+          expectedVersions: Object.fromEntries(selected.map((row) => [String(row.id), Number(row.version)])),
+          concurrentCount: Math.min(2, Math.max(1, Number(otherSetting.value.assetsBatchGenereateSize) || 2)),
+          idempotencyKey: createIdempotencyKey("novel-events"),
         });
+        activeEventRunId.value = String(data?.run?.id ?? "");
+        selectedRowKeys.value.length = 0;
+        window.$message.success("事件提取已开始，可离开页面后稍后查看");
+        getNovel();
+      } catch (error) {
+        window.$message.error((error as Error).message);
+      }
     },
   });
 }
 
 const notCompultedData = computed(() => {
-  return tableData.value.filter((item) => !item.eventState);
+  return tableData.value.filter((item) => item.eventState === 0);
 });
 
 // 轮询相关
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
 
-async function pollEventState() {
-  if (notCompultedData.value.length === 0) return;
-  const ids = notCompultedData.value.map((item) => item.id);
+async function pollEventState(requestedIds?: number[]) {
+  const ids = requestedIds ?? notCompultedData.value.map((item) => item.id);
+  if (ids.length === 0) return;
   try {
-    const { data } = await axios.post("/novel/getNovelEventState", { ids });
+    const { data } = await axios.post("/novel/getNovelEventState", { projectId: Number(project.value?.id), ids });
     if (Array.isArray(data)) {
       data.forEach((item: { id: number; eventState: number; event?: string; errorReason?: string }) => {
         const target = tableData.value.find((row) => row.id === item.id);
         if (target) {
           target.eventState = item.eventState;
-          if (target.eventState == -1) target.errorReason = item.errorReason;
+          target.errorReason = item.errorReason;
           if (item.event !== undefined) target.event = item.event;
         }
       });

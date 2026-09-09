@@ -65,6 +65,7 @@
 <script setup lang="ts">
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const { project } = storeToRefs(projectStore());
 
 interface AudioItem {
@@ -74,10 +75,12 @@ interface AudioItem {
   text: string;
   name: string;
   describe: string;
+  version?: number;
 }
 const props = defineProps<{
   formData: {
     id?: number;
+    version?: number;
     name: string;
     describe: string;
     sex: string;
@@ -86,7 +89,8 @@ const props = defineProps<{
       src?: string;
       prompt: string;
       name?: string;
-      describe?: string;
+  describe?: string;
+  version?: number;
     }[];
   };
 }>();
@@ -106,6 +110,14 @@ const formRef = ref();
 const emit = defineEmits(["getFilteredData"]);
 
 const audioItems = ref<AudioItem[]>([{ file: null, text: "", name: "", describe: "" }]);
+const assetsTouched = ref(false);
+const idempotencyKey = ref("");
+watch(addAssetsShow, (visible) => {
+  if (visible) {
+    idempotencyKey.value = createIdempotencyKey("audio-asset");
+    assetsTouched.value = false;
+  } else idempotencyKey.value = "";
+});
 const fileInputRefs = ref<HTMLInputElement[]>([]);
 
 // 初始化音频列表
@@ -129,10 +141,12 @@ watch(
 );
 
 function addAudioItem() {
+  assetsTouched.value = true;
   audioItems.value.push({ file: null, text: "", name: "", describe: "" });
 }
 
 function removeAudioItem(index: number) {
+  assetsTouched.value = true;
   audioItems.value.splice(index, 1);
   if (audioItems.value.length === 0) {
     audioItems.value.push({ file: null, text: "", name: "", describe: "" });
@@ -148,6 +162,7 @@ function handleFileChange(e: Event, index: number) {
   const file = input.files?.[0];
   if (file) {
     audioItems.value[index].file = file;
+    assetsTouched.value = true;
     audioItems.value[index].src = undefined;
     if (!audioItems.value[index].name) {
       audioItems.value[index].name = file.name;
@@ -160,6 +175,7 @@ function handleDrop(e: DragEvent, index: number) {
   const file = e.dataTransfer?.files?.[0];
   if (file && file.type.startsWith("audio/")) {
     audioItems.value[index].file = file;
+    assetsTouched.value = true;
     if (!audioItems.value[index].name) {
       audioItems.value[index].name = file.name;
     }
@@ -216,15 +232,17 @@ function onConfirm() {
       const payload = {
         name: props.formData.name,
         describe: props.formData.sex + "|" + props.formData.describe,
-        projectId: project.value?.id ?? 0,
+        projectId: Number(project.value?.id ?? 0),
         assetsItem,
       };
-      console.log(props.formData.id);
       if (props.formData.id) {
         await axios
           .post(`/assets/updateAudioAssets`, {
             id: props.formData.id,
-            ...payload,
+            projectId: Number(project.value?.id ?? 0),
+            expectedVersion: props.formData.version,
+            ...(assetsTouched.value ? { assetsItem: assetsItem.map((item: any) => item.id == null ? item : { ...item, expectedVersion: audioItems.value.find((audio) => audio.id === item.id)?.version }) } : {}),
+            idempotencyKey: idempotencyKey.value,
           })
           .then(() => {
             window.$message.success($t("workbench.assets.add.updateSuccess"));
@@ -232,7 +250,7 @@ function onConfirm() {
             addAssetsShow.value = false;
           });
       } else {
-        await axios.post(`/assets/addAudioAssets`, payload).then(() => {
+        await axios.post(`/assets/addAudioAssets`, { ...payload, idempotencyKey: idempotencyKey.value }).then(() => {
           window.$message.success($t("workbench.assets.add.addSuccess"));
           emit("getFilteredData");
           addAssetsShow.value = false;

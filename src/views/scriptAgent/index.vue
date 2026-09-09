@@ -4,8 +4,28 @@
       <Pane :size="30" :min-size="15" class="operate">
         <div class="box pr">
           <t-chat-list :clear-history="false">
+            <template v-for="message in visibleMessages" :key="message.id">
             <t-chat-message
-              v-for="message in messages"
+              v-if="getBuiltinArtifact(message)"
+              :message="message"
+              :name="(message as any).name"
+              :placement="message.role === 'user' ? 'right' : 'left'"
+              :variant="message.role === 'user' ? 'base' : 'outline'"
+              :status="message.status"
+              allowContentSegmentCustom>
+              <template #content>
+                <div class="builtinArtifactCard">
+                  <strong>{{ getBuiltinArtifact(message)?.title }}</strong>
+                  <span>{{ getBuiltinArtifact(message)?.detail }}</span>
+                  <t-tag v-if="getBuiltinArtifact(message)?.selected === false" size="small" theme="warning" variant="light">待选择</t-tag>
+                  <t-button size="small" variant="outline" @click="openBuiltinArtifact(getBuiltinArtifact(message)!.target)">
+                    {{ getBuiltinArtifact(message)?.actionLabel }}
+                  </t-button>
+                </div>
+              </template>
+            </t-chat-message>
+            <t-chat-message
+              v-else
               :key="message.id"
               :message="message"
               :name="(message as any).name"
@@ -14,7 +34,9 @@
               :handleActions="message.role === 'user' ? {} : handleActions"
               :status="message.status"
               allowContentSegmentCustom></t-chat-message>
+            </template>
           </t-chat-list>
+          <BuiltinRunPanel ref="builtinRunPanelRef" agent-type="scriptAgent" :project-id="project?.id" title="剧本内置 Agent" :show-composer="false" />
           <t-chat-sender
             class="inputBox"
             :disabled="status === 'pending' || status === 'streaming'"
@@ -77,7 +99,6 @@
               </t-popup>
             </template>
           </t-chat-sender>
-          <i-dot class="dot" theme="outline" :fill="connected ? 'green' : 'red'" />
           <transition name="fade">
             <div v-if="forceGenerateVisible" class="forceGenerateMask">
               <div class="forceGenerateCard">
@@ -217,7 +238,59 @@ import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
 import editMdPreivew from "@/components/editMdPreivew.vue";
 import scriptAgentStore from "@/stores/scriptAgent";
-const { connected, messages, status, planData, thinkLevel } = storeToRefs(scriptAgentStore());
+import BuiltinRunPanel from "@/components/builtinAgent/BuiltinRunPanel.vue";
+import builtinAgentStore from "@/stores/builtinAgent";
+import { builtinScopeKey, type BuiltinArtifactTarget, type BuiltinArtifactView } from "@/types/builtinAgent";
+const scriptAgent = scriptAgentStore();
+const builtinRunPanelRef = ref<{ startPrompt: (value: string) => Promise<void> } | null>(null);
+const { messages, status, planData, thinkLevel } = storeToRefs(scriptAgent);
+const router = useRouter();
+const route = useRoute();
+const builtinRuns = builtinAgentStore();
+const builtinScope = computed(() => ({ agentType: "scriptAgent" as const, projectId: project.value?.id == null ? null : Number(project.value.id), scriptId: null }));
+const selectedBuiltinRun = computed(() => {
+  const id = builtinRuns.selectedRunByScope[builtinScopeKey(builtinScope.value)];
+  return id ? builtinRuns.runs[id] : undefined;
+});
+type VisibleChatMessage = ChatMessagesData & { artifact?: BuiltinArtifactView };
+const visibleMessages = computed<VisibleChatMessage[]>(() => {
+  if (!selectedBuiltinRun.value) return messages.value as VisibleChatMessage[];
+  return builtinRuns.messagesForRun(selectedBuiltinRun.value.id).map((message) => ({
+    id: message.id,
+    role: message.role,
+    name: message.role === "assistant" ? "内置 Agent" : undefined,
+    status: message.role === "system" ? "error" : "complete",
+    content: [{ type: "text", status: "complete", data: message.text }],
+    artifact: message.artifact,
+  })) as VisibleChatMessage[];
+});
+function getBuiltinArtifact(message: ChatMessagesData): BuiltinArtifactView | undefined {
+  return (message as VisibleChatMessage).artifact;
+}
+function openBuiltinArtifact(target: BuiltinArtifactTarget) {
+  const runProjectId = selectedBuiltinRun.value?.projectId;
+  if (runProjectId != null && Number(project.value?.id) !== runProjectId) {
+    const runProject = projectStore().allProject.find((item) => Number(item.id) === runProjectId);
+    if (!runProject) {
+      window.$message.error("该产物所属项目当前不可用");
+      return;
+    }
+    projectStore().project = runProject;
+  }
+  if (target === "script") {
+    currentTable.value = 3;
+    return;
+  }
+  if (target === "novel") {
+    void router.push("/novel");
+    return;
+  }
+  if (target === "assets" || target === "images") {
+    void router.push("/assets");
+    return;
+  }
+  void router.push({ path: "/production", query: { scriptId: selectedBuiltinRun.value?.scriptId?.toString(), focus: target } });
+}
 const thinkLevelOptions = [
   { label: $t("workbench.scriptAgent.thinkLevel.off"), value: 0 },
   { label: $t("workbench.scriptAgent.thinkLevel.light"), value: 1 },
@@ -226,6 +299,7 @@ const thinkLevelOptions = [
 ];
 import productionAgentStore from "@/stores/productionAgent";
 const currentTable = ref(1);
+if (route.query.tab === "script") currentTable.value = 3;
 const inputValue = ref("");
 const toolbars: ToolbarNames[] = [
   "bold",
@@ -269,28 +343,21 @@ onMounted(() => {
   if (messages.value.length <= 0) messages.value = [...defMsg, ...messages.value];
   getPlanData();
   getNovel();
-  scriptAgentStore().connect();
-
   if (messages.value.length <= 1) getHistory();
 });
-const agentWorkDataId = ref<number>();
 async function getPlanData() {
-  const { data } = await axios.post("/scriptAgent/getPlanData", { projectId: project.value?.id, agentType: "scriptAgent" });
-  planData.value.storySkeleton = data.data.storySkeleton;
-  planData.value.adaptationStrategy = data.data.adaptationStrategy;
-  planData.value.script = data.data.script || [];
-  agentWorkDataId.value = data.id;
+  await scriptAgent.refreshPlanData({ force: true });
 }
 
 //快捷发送
 const handleActions = {
   suggestion: (data?: any) => {
-    scriptAgentStore().chat(data?.content?.prompt);
+    void handleSend(data?.content?.prompt ?? "");
   },
 };
 
-function handleSend(text: string) {
-  scriptAgentStore().chat(text);
+async function handleSend(text: string) {
+  await builtinRunPanelRef.value?.startPrompt(text);
   inputValue.value = "";
 }
 function handleStop() {
@@ -384,9 +451,10 @@ function editScript(index: number) {
 
 async function saveScript() {
   if (scriptEditIndex.value < 0) return;
-  planData.value.script[scriptEditIndex.value] = { ...scriptEditData.value };
-  await scriptAgentStore().setPlanData();
-  await getPlanData();
+  const previous = planData.value.script[scriptEditIndex.value];
+  planData.value.script[scriptEditIndex.value] = { ...previous, ...scriptEditData.value };
+  scriptAgent.markPlanDraftDirty();
+  await scriptAgent.setPlanData();
   window.$message.success($t("workbench.scriptAgent.msg.scriptUpdated"));
   scriptEditVisible.value = false;
 }
@@ -399,36 +467,29 @@ async function delScript(index: number) {
     cancelBtn: $t("workbench.scriptAgent.msg.cancel"),
     theme: "danger",
     onConfirm: async () => {
-      if (item.id) {
-        await axios.post("/script/delScript", { ids: [item.id] });
+      try {
         planData.value.script.splice(index, 1);
-      } else {
-        planData.value.script.splice(index, 1);
+        scriptAgent.markPlanDraftDirty();
+        await scriptAgent.setPlanData();
+        window.$message.success($t("workbench.scriptAgent.msg.scriptDeleted"));
+        dialog.destroy();
+      } catch (error: any) {
+        window.$message.error(error?.message ?? $t("workbench.scriptAgent.msg.error"));
       }
-      await scriptAgentStore().setPlanData();
-      await getPlanData();
-      window.$message.success($t("workbench.scriptAgent.msg.scriptDeleted"));
-      dialog.destroy();
     },
   });
 }
 function onConfirm(value: string) {
-  axios
-    .post("/scriptAgent/updateData", {
-      id: agentWorkDataId.value,
-      data: {
-        storySkeleton: currentTable.value == 1 ? value : planData.value.storySkeleton,
-        adaptationStrategy: currentTable.value == 2 ? value : planData.value.adaptationStrategy,
-        script: planData.value.script,
-      },
-    })
-    .then(() => {
-      window.$message.success($t("workbench.scriptAgent.msg.updated"));
-      getPlanData();
-    })
-    .catch((err) => {
-      window.$message.error(err?.message ?? $t("workbench.scriptAgent.msg.error"));
-    });
+  const data = {
+    storySkeleton: currentTable.value == 1 ? value : planData.value.storySkeleton,
+    adaptationStrategy: currentTable.value == 2 ? value : planData.value.adaptationStrategy,
+    script: planData.value.script,
+  };
+  scriptAgent.markPlanDraftDirty();
+  scriptAgent
+    .setPlanData(data)
+    .then(() => window.$message.success($t("workbench.scriptAgent.msg.updated")))
+    .catch((err) => window.$message.error(err?.message ?? $t("workbench.scriptAgent.msg.error")));
 }
 
 const showThink = ref(false);
@@ -574,6 +635,13 @@ function toggleAllCards() {
       }
     }
   }
+}
+.builtinArtifactCard {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  span { color: var(--td-text-color-secondary); }
 }
 
 .panelContent {

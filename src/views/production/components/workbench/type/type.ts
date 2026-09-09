@@ -46,6 +46,7 @@ interface StoryboardItem {
 
 interface TrackItem {
   id: number;
+  version?: number;
   prompt: string;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
   reason?: string;
@@ -58,7 +59,7 @@ interface TrackItem {
 interface VideoItem {
   id: number;
   src: string;
-  state: "未生成" | "生成中" | "已完成" | "生成失败";
+  state: "未生成" | "生成中" | "已完成" | "生成成功" | "生成失败" | "需人工核对";
   errorReason?: string | null;
 }
 interface TrackMediaBase {
@@ -95,6 +96,7 @@ interface HistoryVideoItem {
   state?: string | null;
   time?: number | null;
   videoTrackId?: number | null;
+  version?: number;
 }
 interface ModelSetting {
   mode: string;

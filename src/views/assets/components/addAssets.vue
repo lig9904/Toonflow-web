@@ -35,6 +35,7 @@
 <script setup lang="ts">
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const { project } = storeToRefs(projectStore());
 const props = defineProps<{
   type: "role" | "tool" | "scene" | "clip" | "audio";
@@ -45,6 +46,7 @@ const props = defineProps<{
     describe: string;
     remark: string;
     prompt: string;
+    version?: number;
   };
 }>();
 const addAssetsShow = defineModel<boolean>({
@@ -53,6 +55,11 @@ const addAssetsShow = defineModel<boolean>({
 const rules = ref<{}>({
   name: [{ required: true, message: $t("workbench.assets.add.nameRequired"), trigger: "blur" }],
   describe: [{ required: true, message: $t("workbench.assets.add.describeRequired"), trigger: "blur" }],
+});
+const idempotencyKey = ref("");
+watch(addAssetsShow, (visible) => {
+  if (visible) idempotencyKey.value = createIdempotencyKey("asset");
+  else idempotencyKey.value = "";
 });
 function handleCancel() {
   addAssetsShow.value = false;
@@ -66,10 +73,13 @@ function onConfirm() {
         await axios
           .post(`/assets/updateAssets`, {
             id: props.formData.id,
+            projectId: Number(project.value?.id),
+            expectedVersion: props.formData.version,
             name: props.formData.name,
             describe: props.formData.describe,
             remark: props.formData.remark,
             prompt: props.formData.prompt,
+            idempotencyKey: idempotencyKey.value,
           })
           .then(() => {
             window.$message.success($t("workbench.assets.add.updateSuccess"));
@@ -83,8 +93,9 @@ function onConfirm() {
             describe: props.formData.describe,
             remark: props.formData.remark,
             type: props.type,
-            projectId: project.value?.id,
+            projectId: Number(project.value?.id),
             prompt: props.formData.prompt,
+            idempotencyKey: idempotencyKey.value,
           })
           .then(() => {
             window.$message.success($t("workbench.assets.add.addSuccess"));

@@ -80,6 +80,7 @@ import { Handle, Position, type Edge } from "@vue-flow/core";
 import editImage from "../components/editImage/index.vue";
 import { type AssetItem, type DeriveAsset } from "../utils/flowBuilder";
 import axios from "@/utils/axios";
+import { createIdempotencyKey } from "@/utils/idempotency";
 import useProductionAgentStore from "@/stores/productionAgent";
 const productionAgent = useProductionAgentStore();
 const { episodesId } = storeToRefs(productionAgent);
@@ -103,6 +104,12 @@ const currentRow = ref<{
 });
 const visible = ref(false);
 const currentAssetsId = ref();
+const currentAssetVersion = ref<number>();
+const mutationKeys = new Map<string, string>();
+function mutationKey(identity: string) {
+  if (!mutationKeys.has(identity)) mutationKeys.set(identity, createIdempotencyKey("derived-asset"));
+  return mutationKeys.get(identity)!;
+}
 function generateAssetsImage(row: DeriveAsset, referanceImageUrl: string) {
   currentRow.value = {
     flowId: row?.flowId,
@@ -110,19 +117,22 @@ function generateAssetsImage(row: DeriveAsset, referanceImageUrl: string) {
     referanceImages: [referanceImageUrl],
   };
   currentAssetsId.value = row.id;
+  currentAssetVersion.value = row.version;
   visible.value = true;
 }
 
 async function save({ imageUrl, flowId }: { imageUrl: string; flowId: number }) {
   if (!imageUrl || !episodesId.value || !project.value?.id) return;
   try {
-    await axios.post("/production/assets/updateAssetsUrl", {
+    const { data } = await axios.post("/production/assets/updateAssetsUrl", {
       id: currentAssetsId.value, url: imageUrl, flowId,
       projectId: Number(project.value.id), scriptId: episodesId.value,
+      expectedVersion: currentAssetVersion.value,
+      idempotencyKey: mutationKey(`select:${currentAssetsId.value}:${currentAssetVersion.value}:${flowId}:${imageUrl}`),
     });
     for (const parent of assets.value) {
       const target = parent.derive.find((item) => item.id === currentAssetsId.value);
-      if (target) { target.state = "已完成"; target.src = imageUrl; target.flowId = flowId; break; }
+      if (target) { target.state = "已完成"; target.src = imageUrl; target.flowId = flowId; target.version = data.version; break; }
     }
     visible.value = false;
   } catch (error) {
@@ -132,6 +142,9 @@ async function save({ imageUrl, flowId }: { imageUrl: string; flowId: number }) 
 }
 
 async function removeFn(id: number) {
+  const target = assets.value.flatMap((asset) => asset.derive).find((item) => item.id === id);
+  if (target?.version == null) return window.$message.error("请刷新素材后再删除");
+  const expectedVersion = target.version;
   const dialog = DialogPlugin.confirm({
     header: $t("workbench.assets.confirmDeleteHeader"),
     body: $t("workbench.production.node.assets.confirmDeleteBody"),
@@ -144,6 +157,8 @@ async function removeFn(id: number) {
           id,
           projectId: Number(project.value?.id),
           scriptId: episodesId.value,
+          expectedVersion,
+          idempotencyKey: mutationKey(`delete:${id}:${expectedVersion}`),
         });
         //找到对应子资产删除
         assets.value.forEach((item) => {

@@ -29,12 +29,13 @@ export function useSocket<T extends SocketEventMap = SocketEventMap>(url = "http
 
     socket = io(url, {
       transports: ["websocket", "polling"],
+      withCredentials: true,
       reconnection: true,
       reconnectionAttempts: 10,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       timeout: 10000,
-      auth: { token: localStorage.getItem("token"), ...authOptions },
+      auth: { ...authOptions },
     });
 
     socket.on("connect", () => (connected.value = true));

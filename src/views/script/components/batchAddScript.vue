@@ -100,6 +100,7 @@ import parseScript from "@/utils/parseScript";
 import mammoth from "mammoth";
 import type { UploadFile, PrimaryTableCol, TableRowData } from "tdesign-vue-next";
 import projectStore from "@/stores/project";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const { project } = storeToRefs(projectStore());
 interface ChapterItem {
   index: number;
@@ -108,6 +109,7 @@ interface ChapterItem {
 }
 
 const purgeNovelShow = defineModel<boolean>();
+const props = defineProps<{ workspaceVersion?: number }>();
 
 const activeKey = ref("To1");
 const uploadRef = ref();
@@ -119,6 +121,8 @@ const nextLoading = ref(false);
 const customRegStr = ref("");
 const regexError = ref("");
 const aiRegexLoading = ref(false);
+const idempotencyKey = ref("");
+const capturedWorkspaceVersion = ref<number | undefined>(undefined);
 
 // 验证正则合法性
 watch(customRegStr, (val) => {
@@ -238,10 +242,19 @@ async function keep() {
     return;
   }
   try {
-    await axios.post("/script/batchAddScript", { projectId: project.value?.id, data: selectedRows.value });
+    if (!idempotencyKey.value) idempotencyKey.value = createIdempotencyKey("script-batch");
+    if (capturedWorkspaceVersion.value == null) capturedWorkspaceVersion.value = props.workspaceVersion;
+    await axios.post("/script/batchAddScript", {
+      projectId: project.value?.id == null ? undefined : Number(project.value.id),
+      data: selectedRows.value,
+      idempotencyKey: idempotencyKey.value,
+      expectedVersion: capturedWorkspaceVersion.value,
+    });
     emit("select");
     window.$message.success($t("workbench.script.import.msg.saveSuccess"));
     purgeNovelShow.value = false;
+    idempotencyKey.value = "";
+    capturedWorkspaceVersion.value = undefined;
   } catch (e) {
     window.$message.error((e as Error).message);
   } finally {
@@ -257,6 +270,15 @@ watch(purgeNovelShow, (newVal) => {
     activeKey.value = "To1";
     customRegStr.value = "";
     regexError.value = "";
+    idempotencyKey.value = "";
+    capturedWorkspaceVersion.value = undefined;
+  }
+});
+
+watch(purgeNovelShow, (visible) => {
+  if (visible) {
+    idempotencyKey.value = createIdempotencyKey("script-batch");
+    capturedWorkspaceVersion.value = props.workspaceVersion;
   }
 });
 

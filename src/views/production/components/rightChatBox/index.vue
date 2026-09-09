@@ -11,9 +11,36 @@
       </div>
     </div>
     <div class="chatBox" v-loading="loadingHistory">
+      <BuiltinRunPanel
+        ref="builtinRunPanelRef"
+        agent-type="productionAgent"
+        :project-id="project?.id"
+        :script-id="episodesId"
+        title="制作内置 Agent"
+        :show-composer="false" />
       <t-chat-list :clear-history="false">
+        <template v-for="message in visibleMessages" :key="message.id">
         <t-chat-message
-          v-for="message in messages"
+          v-if="getBuiltinArtifact(message)"
+          :message="message"
+          :name="(message as any).name"
+          :placement="message.role === 'user' ? 'right' : 'left'"
+          :variant="message.role === 'user' ? 'base' : 'outline'"
+          :status="message.status"
+          allowContentSegmentCustom>
+          <template #content>
+            <div class="builtinArtifactCard">
+              <strong>{{ getBuiltinArtifact(message)?.title }}</strong>
+              <span>{{ getBuiltinArtifact(message)?.detail }}</span>
+              <t-tag v-if="getBuiltinArtifact(message)?.selected === false" size="small" theme="warning" variant="light">待选择</t-tag>
+              <t-button size="small" variant="outline" @click="openBuiltinArtifact(getBuiltinArtifact(message)!.target)">
+                {{ getBuiltinArtifact(message)?.actionLabel }}
+              </t-button>
+            </div>
+          </template>
+        </t-chat-message>
+        <t-chat-message
+          v-else
           :key="message.id"
           :message="message"
           :name="(message as any).name"
@@ -26,10 +53,11 @@
             <t-chat-actionbar :action-bar="['replay', 'copy']" />
           </template> -->
         </t-chat-message>
+        </template>
       </t-chat-list>
       <t-chat-sender
         class="inputBox"
-        :disabled="status === 'pending' || status === 'streaming' || !connected"
+        :disabled="status === 'pending' || status === 'streaming'"
         v-model="inputValue"
         :loading="status === 'pending' || status === 'streaming'"
         :placeholder="$t('workbench.production.chatBox.inputPlaceholder')"
@@ -96,9 +124,39 @@ import { useMousePressed, useMouse } from "@vueuse/core";
 import _ from "lodash";
 import axios from "@/utils/axios";
 import productionAgentStore from "@/stores/productionAgent";
+import BuiltinRunPanel from "@/components/builtinAgent/BuiltinRunPanel.vue";
+import builtinAgentStore from "@/stores/builtinAgent";
+import { builtinScopeKey, type BuiltinArtifactTarget, type BuiltinArtifactView } from "@/types/builtinAgent";
+import type { ChatMessagesData } from "@tdesign-vue-next/chat";
 import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
+const builtinRunPanelRef = ref<{ startPrompt: (value: string) => Promise<void> } | null>(null);
 const { connected, messages, status, episodesId, loadingHistory, thinkLevel } = storeToRefs(productionAgentStore());
+const builtinRuns = builtinAgentStore();
+const builtinScope = computed(() => ({
+  agentType: "productionAgent" as const,
+  projectId: project.value?.id == null ? null : Number(project.value.id),
+  scriptId: episodesId.value == null ? null : Number(episodesId.value),
+}));
+const selectedBuiltinRun = computed(() => {
+  const id = builtinRuns.selectedRunByScope[builtinScopeKey(builtinScope.value)];
+  return id ? builtinRuns.runs[id] : undefined;
+});
+type VisibleChatMessage = ChatMessagesData & { artifact?: BuiltinArtifactView };
+const visibleMessages = computed<VisibleChatMessage[]>(() => {
+  if (!selectedBuiltinRun.value) return messages.value as VisibleChatMessage[];
+  return builtinRuns.messagesForRun(selectedBuiltinRun.value.id).map((message) => ({
+    id: message.id,
+    role: message.role,
+    name: message.role === "assistant" ? "内置 Agent" : undefined,
+    status: message.role === "system" ? "error" : "complete",
+    content: [{ type: "text", status: "complete", data: message.text }],
+    artifact: message.artifact,
+  })) as VisibleChatMessage[];
+});
+function getBuiltinArtifact(message: ChatMessagesData): BuiltinArtifactView | undefined {
+  return (message as VisibleChatMessage).artifact;
+}
 const thinkLevelOptions = [
   { label: $t("workbench.scriptAgent.thinkLevel.off"), value: 0 },
   { label: $t("workbench.scriptAgent.thinkLevel.light"), value: 1 },
@@ -109,12 +167,28 @@ const thinkThemes = ["default", "success", "warning", "danger"] as const;
 
 const props = defineProps({ title: String });
 
-const emit = defineEmits(["close"]);
+const emit = defineEmits<{
+  close: [];
+  navigateArtifact: [target: BuiltinArtifactTarget];
+}>();
+
+function openBuiltinArtifact(target: BuiltinArtifactTarget) {
+  const runProjectId = selectedBuiltinRun.value?.projectId;
+  if (runProjectId != null && Number(project.value?.id) !== runProjectId) {
+    const runProject = projectStore().allProject.find((item) => Number(item.id) === runProjectId);
+    if (!runProject) {
+      window.$message.error("该产物所属项目当前不可用");
+      return;
+    }
+    projectStore().project = runProject;
+  }
+  emit("navigateArtifact", target);
+}
 
 const inputValue = ref("");
 
 function handleSend(text: string) {
-  productionAgentStore().chat(text);
+  void builtinRunPanelRef.value?.startPrompt(text);
   inputValue.value = "";
 }
 function handleStop() {
@@ -137,7 +211,7 @@ function handleReconnect() {
 //快捷发送
 const handleActions = {
   suggestion: (data?: any) => {
-    productionAgentStore().chat(data?.content?.prompt);
+    handleSend(data?.content?.prompt ?? "");
   },
 };
 
@@ -239,6 +313,13 @@ watch(connected, (newVal) => {
   }
   :deep(.t-chat__list) {
     padding-right: 8px;
+  }
+  .builtinArtifactCard {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    span { color: var(--td-text-color-secondary); }
   }
   .header {
     height: 40px;

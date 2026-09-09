@@ -539,12 +539,13 @@ export function useChat(options: UseChatOptions) {
     if (!socket.value) {
       socket.value = io(url, {
         transports: ["websocket", "polling"],
+        withCredentials: true,
         reconnection: true,
         reconnectionAttempts: 10,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 5000,
         timeout: 10000,
-        auth: { token: localStorage.getItem("token"), ...(typeof auth === 'function' ? auth() : auth) },
+        auth: { ...(typeof auth === "function" ? auth() : auth) },
       });
 
       setupHandlers();

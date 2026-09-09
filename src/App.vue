@@ -19,10 +19,16 @@ import { cachedLocale, languageList } from "@/locales";
 import { initTheme } from "@/utils/theme";
 import { type GlobalConfigProvider } from "tdesign-vue-next";
 import { useI18n } from "vue-i18n";
+import { bootstrapSession } from "@/utils/session";
+import projectStore from "@/stores/project";
+import imageListCacheStore from "@/stores/imageListCache";
+import teamStore from "@/stores/team";
+import builtinAgentStore from "@/stores/builtinAgent";
 
 const { locale } = useI18n();
 const settings = settingStore();
 const { baseUrl, isElectron } = storeToRefs(settings);
+const router = useRouter();
 import { config } from "md-editor-v3";
 
 const loading = ref(true);
@@ -47,6 +53,20 @@ onBeforeMount(() => {
     }
   });
 });
+
+function clearAuthDependentState() {
+  const projects = projectStore();
+  projects.project = null;
+  projects.allProject = [];
+  const imageCache = imageListCacheStore();
+  imageCache.cacheData = {};
+  imageCache.urlMap = {};
+  teamStore().clear();
+  builtinAgentStore().clear();
+}
+
+onBeforeMount(() => window.addEventListener("toonflow:auth-cleared", clearAuthDependentState));
+onBeforeUnmount(() => window.removeEventListener("toonflow:auth-cleared", clearAuthDependentState));
 
 // 初始化主题
 onMounted(async () => {
@@ -93,7 +113,10 @@ async function getPort() {
     }
   }
 
+  const authenticated = await bootstrapSession();
   loading.value = false;
+  if (authenticated && router.currentRoute.value.path === "/login") await router.replace("/project");
+  if (!authenticated && router.currentRoute.value.path !== "/login") await router.replace("/login");
 
   config({
     markdownItConfig(md) {

@@ -52,6 +52,16 @@
                 :autosize="{ minRows: 3, maxRows: 6 }"
                 :placeholder="$t('workbench.project.dialog.novelIntroPh')" />
             </t-form-item>
+            <template v-if="!isEdit">
+              <t-form-item label="创作要求（可选）">
+                <t-textarea
+                  v-model="formState.creativePrompt"
+                  :autosize="{ minRows: 3, maxRows: 6 }"
+                  placeholder="例如：先整理故事骨架，再生成第一版分集剧本" />
+              </t-form-item>
+              <t-checkbox v-model="formState.startBuiltinAgent">项目创建成功后交给内置 Agent</t-checkbox>
+              <div v-if="formState.startBuiltinAgent" class="handoffHint">只会在项目创建成功并拿到 projectId 后启动；图片和视频生成授权默认为 0。</div>
+            </template>
           </t-form>
         </div>
         <div class="formRight">
@@ -186,7 +196,7 @@
             <div class="promptEditorWrapper">
               <div class="promptEditorHeader">
                 <div class="aiExtractInline">
-                  <t-tabs :value="visualManualTabValue" size="medium" @change="(v) => (visualManualTabValue = v)">
+                  <t-tabs :value="visualManualTabValue" size="medium" @change="(v: TabValue) => (visualManualTabValue = v)">
                     <t-tab-panel v-for="tab in visualManualTabData" :key="tab.value" :value="tab.value" :label="tab.label">
                       <MdEditor
                         v-model="tab.data"
@@ -257,7 +267,7 @@
             <div class="promptEditorWrapper">
               <div class="promptEditorHeader">
                 <div class="aiExtractInline">
-                  <t-tabs :value="directorManualTabValue" size="medium" @change="(v) => (directorManualTabValue = v)">
+                  <t-tabs :value="directorManualTabValue" size="medium" @change="(v: TabValue) => (directorManualTabValue = v)">
                     <t-tab-panel v-for="tab in directorManualTabData" :key="tab.value" :value="tab.value" :label="tab.label">
                       <MdEditor
                         v-model="tab.data"
@@ -291,6 +301,7 @@ import type { ToolbarNames } from "md-editor-v3";
 import modelSelect from "@/components/modelSelect.vue";
 import type { TabValue } from "tdesign-vue-next";
 import { DialogPlugin } from "tdesign-vue-next";
+import { createIdempotencyKey as makeIdempotencyKey } from "@/utils/idempotency";
 
 const addProjectShow = defineModel<boolean>();
 const props = defineProps<{
@@ -313,6 +324,8 @@ const emit = defineEmits<{
       projectType: string;
       imageQuality: "1K" | "2K" | "4K" | "";
       mode: string;
+      expectedVersion?: number;
+      mutationKey?: string;
     },
   ): void;
 }>();
@@ -332,6 +345,7 @@ interface ProjectData {
   imageQuality: "1K" | "2K" | "4K" | "";
   visualManual?: string;
   mode: string;
+  version?: number;
 }
 
 interface ProjectFormData {
@@ -346,6 +360,11 @@ interface ProjectFormData {
   videoModel: string;
   imageQuality: "1K" | "2K" | "4K" | "";
   mode: string;
+  creativePrompt?: string;
+  startBuiltinAgent?: boolean;
+  idempotencyKey?: string;
+  expectedVersion?: number;
+  mutationKey?: string;
 }
 interface VisualManualItem {
   name: string;
@@ -405,10 +424,24 @@ const DEFAULT_FORM: () => ProjectFormData & { id: number; era: string; createTim
   imageQuality: "",
   mode: "",
   directorManual: "",
+  creativePrompt: "",
+  startBuiltinAgent: false,
 });
 
 // ===== 表单 =====
 const formState = ref(DEFAULT_FORM());
+const createIdempotencyKey = ref("");
+
+function ensureCreateIdempotencyKey(): string {
+  if (!createIdempotencyKey.value) {
+    createIdempotencyKey.value = createIdempotencyKeyForMode();
+  }
+  return createIdempotencyKey.value;
+}
+
+function createIdempotencyKeyForMode(): string {
+  return makeIdempotencyKey("project");
+}
 
 function resetForm() {
   formState.value = DEFAULT_FORM();
@@ -416,6 +449,7 @@ function resetForm() {
 
 function handleCancel() {
   addProjectShow.value = false;
+  createIdempotencyKey.value = "";
   resetForm();
 }
 
@@ -444,6 +478,8 @@ function handleOk() {
       directorManual: formState.value.directorManual,
       imageQuality: formState.value.imageQuality,
       mode: formState.value.mode,
+      expectedVersion: props.projectData?.version,
+      mutationKey: ensureCreateIdempotencyKey(),
     });
   } else {
     emit("add", {
@@ -458,10 +494,11 @@ function handleOk() {
       imageQuality: formState.value.imageQuality,
       directorManual: formState.value.directorManual,
       mode: formState.value.mode,
+      creativePrompt: formState.value.creativePrompt?.trim() ?? "",
+      startBuiltinAgent: formState.value.startBuiltinAgent,
+      idempotencyKey: ensureCreateIdempotencyKey(),
     });
   }
-  resetForm();
-  addProjectShow.value = false;
 }
 
 // ===== 视觉手册 Prompt 工具栏 =====
@@ -483,6 +520,8 @@ const promptToolbars: ToolbarNames[] = [
 watch(addProjectShow, async (visible) => {
   if (visible) {
     if (props.projectData) {
+      createIdempotencyKey.value = "";
+      ensureCreateIdempotencyKey();
       formState.value = {
         ...DEFAULT_FORM(),
         id: props.projectData.id as unknown as number,
@@ -516,6 +555,8 @@ watch(addProjectShow, async (visible) => {
       }
     } else {
       resetForm();
+      createIdempotencyKey.value = "";
+      ensureCreateIdempotencyKey();
     }
     fetchVisualManuals();
     queryDirectorManual();
@@ -1211,5 +1252,12 @@ function handleDirectorManualCoverFileChange(e: Event) {
     height: 75vh;
     overflow-y: auto;
   }
+}
+
+.handoffHint {
+  margin: 6px 0 0 24px;
+  color: var(--td-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 </style>

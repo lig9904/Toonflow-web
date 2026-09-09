@@ -78,12 +78,14 @@ import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import openAssetsSelector from "@/utils/assetsCheck";
 import settingStore from "@/stores/setting";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const { otherSetting } = storeToRefs(settingStore());
 const { project } = storeToRefs(projectStore());
 
 const addScriptShow = defineModel<boolean>({
   default: false,
 });
+const props = defineProps<{ workspaceVersion?: number }>();
 
 const uploadRef = ref<any>(null);
 const content = ref<string>("");
@@ -91,6 +93,8 @@ const fileList = ref<UploadFile[]>([]);
 const scriptData = ref<string>("");
 
 const keepLoading = ref(false);
+const idempotencyKey = ref("");
+const capturedWorkspaceVersion = ref<number | undefined>(undefined);
 
 // 触发上传
 function triggerUpload(): void {
@@ -186,6 +190,8 @@ function handleCancel(): void {
   content.value = "";
   fileList.value = [];
   selectedAssets.value = [];
+  idempotencyKey.value = "";
+  capturedWorkspaceVersion.value = undefined;
 }
 function closeWin(): void {
   scriptData.value = "";
@@ -193,6 +199,8 @@ function closeWin(): void {
   fileList.value = [];
   selectedAssets.value = [];
   addScriptShow.value = false;
+  idempotencyKey.value = "";
+  capturedWorkspaceVersion.value = undefined;
 }
 const emit = defineEmits(["searchScripts"]);
 async function handleConfirm(): Promise<void> {
@@ -206,11 +214,15 @@ async function handleConfirm(): Promise<void> {
   }
   keepLoading.value = true;
   try {
+    if (!idempotencyKey.value) idempotencyKey.value = createIdempotencyKey("script-create");
+    if (capturedWorkspaceVersion.value == null) capturedWorkspaceVersion.value = props.workspaceVersion;
     await axios.post("/script/addScript", {
       name: scriptName.value,
       content: scriptData.value,
-      projectId: project.value?.id,
+      projectId: project.value?.id == null ? undefined : Number(project.value.id),
       assets: selectedAssets.value.map((a) => a.id),
+      idempotencyKey: idempotencyKey.value,
+      expectedVersion: capturedWorkspaceVersion.value,
     });
     window.$message.success($t("workbench.script.add.msg.addSuccess"));
     closeWin();
@@ -223,6 +235,13 @@ async function handleConfirm(): Promise<void> {
   }
 }
 const scriptName = ref<string>("");
+
+watch(addScriptShow, (visible) => {
+  if (visible) {
+    idempotencyKey.value = createIdempotencyKey("script-create");
+    capturedWorkspaceVersion.value = props.workspaceVersion;
+  }
+});
 </script>
 
 <style lang="scss" scoped>

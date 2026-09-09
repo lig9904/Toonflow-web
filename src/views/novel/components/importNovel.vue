@@ -61,9 +61,8 @@
               <div class="selectedInfo">{{ $t("workbench.novel.import.selectedInfo", { count: selectedTextLength }) }}</div>
               <div style="margin-top: 16px; text-align: right">
                 <t-button variant="outline" @click="activeKey = 'To1'">{{ $t("workbench.novel.import.prevStep") }}</t-button>
-                <t-button theme="primary" style="margin-left: 10px" :loading="nextLoading" @click="keep">
-                  保存
-                </t-button>
+                <t-button theme="primary" style="margin-left: 10px" :loading="nextLoading" @click="keep">保存</t-button>
+                <t-checkbox v-model="processEvents" style="margin-left: 12px">保存后处理事件</t-checkbox>
               </div>
             </div>
           </t-tab-panel>
@@ -80,6 +79,7 @@ import parseNovel from "@/utils/parseNovel";
 import mammoth from "mammoth";
 import type { UploadFile, PrimaryTableCol, TableRowData } from "tdesign-vue-next";
 import projectStore from "@/stores/project";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const { project } = storeToRefs(projectStore());
 interface ChapterItem {
   index: number;
@@ -97,6 +97,8 @@ const fileList = ref<any[]>([]);
 const selectedRowKeys = ref<number[]>([]);
 
 const nextLoading = ref(false);
+const processEvents = ref(false);
+const idempotencyKey = ref("");
 
 const columns: PrimaryTableCol<TableRowData>[] = [
   { colKey: "row-select", type: "multiple", width: 60 },
@@ -206,17 +208,23 @@ async function keep() {
     return;
   }
   try {
-    await axios.post("/novel/addNovel", { projectId: project.value?.id, data: selectedRows.value });
-    nextLoading.value = false;
+    if (!idempotencyKey.value) idempotencyKey.value = createIdempotencyKey("novel-import");
+    const { data } = await axios.post("/novel/addNovel", {
+      projectId: project.value?.id == null ? undefined : Number(project.value.id),
+      data: selectedRows.value,
+      processEvents: processEvents.value,
+      idempotencyKey: idempotencyKey.value,
+    });
     emit("select");
-    window.$message.success($t("workbench.novel.import.msg.saveSuccess"));
+    const runId = String(data?.eventRun?.run?.id ?? "");
+    window.$message.success(processEvents.value ? `原文已保存，事件提取已开始${runId ? `（运行 ${runId.slice(0, 8)}）` : ""}` : $t("workbench.novel.import.msg.saveSuccess"));
+    idempotencyKey.value = "";
+    processEvents.value = false;
+    purgeNovelShow.value = false;
   } catch (e) {
     window.$message.error((e as Error).message);
-    nextLoading.value = false;
-  } finally {
-    nextLoading.value = false;
-    purgeNovelShow.value = false;
   }
+  nextLoading.value = false;
 }
 //关闭弹窗时重置数据
 watch(purgeNovelShow, (newVal) => {
@@ -225,6 +233,8 @@ watch(purgeNovelShow, (newVal) => {
     fileList.value = [];
     selectedRowKeys.value = [];
     activeKey.value = "To1";
+    processEvents.value = false;
+    idempotencyKey.value = "";
   }
 });
 </script>

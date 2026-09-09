@@ -19,6 +19,8 @@
 <script setup lang="ts">
 import type { FormInstanceFunctions, SubmitContext, FormRules } from "tdesign-vue-next";
 import axios from "@/utils/axios";
+import userStore from "@/stores/user";
+import { useRouter } from "vue-router";
 
 interface UserForm {
   id: number | null;
@@ -28,6 +30,7 @@ interface UserForm {
 
 const formRef = ref<FormInstanceFunctions | null>(null);
 const loading = ref(false);
+const router = useRouter();
 
 const formData = ref<UserForm>({
   id: null,
@@ -63,7 +66,13 @@ async function fetchUserInfo() {
 async function saveUserInfo() {
   loading.value = true;
   try {
-    await axios.post("/setting/loginConfig/updateUserPwd", formData.value);
+    const response = await axios.post("/setting/loginConfig/updateUserPwd", formData.value);
+    const result = response?.data ?? response;
+    if (result?.reauthenticate) {
+      userStore().clearSession({ removeLegacyToken: true, reason: "password-changed" });
+      await router.replace("/login");
+      return;
+    }
     window.$message.success($t("settings.login.msg.saveSuccess"));
     await fetchUserInfo();
   } catch (error) {

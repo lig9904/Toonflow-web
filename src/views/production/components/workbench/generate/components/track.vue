@@ -76,6 +76,7 @@ import imageListCacheStore from "@/stores/imageListCache";
 import JSZip from "jszip";
 import settingStore from "@/stores/setting";
 import { createGenerationIntentStore, shouldRetainGenerationIntent } from "@/utils/generationIntent";
+import { createIdempotencyKey } from "@/utils/idempotency";
 
 const { otherSetting } = storeToRefs(settingStore());
 const generationIntents = createGenerationIntentStore();
@@ -101,6 +102,13 @@ const emit = defineEmits<{
   saveImageList: [trackId: number];
 }>();
 const checkAll = ref(false); // 全选状态
+const deleteTrackIntents = new Map<number, { version: number; key: string }>();
+const createTrackIntent = ref<{ signature: string; key: string }>();
+
+function retainMutationIntent(error: any): boolean {
+  const status = Number(error?.status);
+  return !Number.isSafeInteger(status) || status >= 500;
+}
 
 /** 视频封面缓存 src -> dataURL */
 const videoCoverMap = ref<Record<string, string>>({});
@@ -162,10 +170,32 @@ function changeIndex(index: number) {
   emit("change", prevIndex);
 }
 /** 删除轨道请求 */
-async function deleteTrack(index: number) {
+async function deleteTrack(index: number): Promise<boolean> {
   const track = trackList.value[index];
-  if (!track) return;
-  await axios.post("/production/workbench/deleteTrack", { id: track.id });
+  if (!track) return false;
+  if (!Number.isSafeInteger(track.version) || track.version! < 0) {
+    window.$message.error("轨道版本尚未加载，请刷新后重试");
+    return false;
+  }
+  const trackVersion = Number(track.version);
+  const existing = deleteTrackIntents.get(track.id);
+  const intent: { version: number; key: string } = existing?.version === trackVersion
+    ? existing
+    : { version: trackVersion, key: createIdempotencyKey("track-delete") };
+  deleteTrackIntents.set(track.id, intent);
+  try {
+    await axios.post("/production/workbench/deleteTrack", {
+      id: track.id,
+      projectId: project.value?.id,
+      scriptId: episodesId.value,
+      expectedVersion: intent.version,
+      idempotencyKey: intent.key,
+    });
+    deleteTrackIntents.delete(track.id);
+  } catch (error) {
+    if (!retainMutationIntent(error)) deleteTrackIntents.delete(track.id);
+    throw error;
+  }
   checkedTrackIds.value = checkedTrackIds.value.filter((id) => id !== track.id);
   // 删除该轨道的图片缓存
   const pid = project.value?.id;
@@ -176,6 +206,7 @@ async function deleteTrack(index: number) {
   if (activeTrackIndex.value >= trackList.value.length) {
     activeTrackIndex.value = trackList.value.length - 1;
   }
+  return true;
 }
 function confirmDeleteTrack(index: number) {
   const dialog = DialogPlugin.confirm({
@@ -185,7 +216,7 @@ function confirmDeleteTrack(index: number) {
     cancelBtn: $t("settings.memory.msg.cancel"),
     onConfirm: async () => {
       try {
-        await deleteTrack(index);
+        if (!(await deleteTrack(index))) return;
         window.$message.success($t("workbench.generate.delSuccess"));
         emit("getData");
       } catch (e: any) {
@@ -201,11 +232,17 @@ async function addTrack() {
   const drMap = modelData.durationResolutionMap;
   if (!Array.isArray(drMap) || drMap.length === 0 || !drMap[0].duration?.length) return;
   const duration = drMap[0].duration[0];
-  const { data } = await axios.post("/production/workbench/addTrack", {
-    projectId: project.value?.id,
-    scriptId: episodesId.value ?? 0,
-    duration,
-  });
+  const payload = { projectId: project.value?.id, scriptId: episodesId.value ?? 0, duration };
+  const signature = JSON.stringify(payload);
+  if (createTrackIntent.value?.signature !== signature) createTrackIntent.value = { signature, key: createIdempotencyKey("track-create") };
+  try {
+    await axios.post("/production/workbench/addTrack", { ...payload, idempotencyKey: createTrackIntent.value.key });
+    createTrackIntent.value = undefined;
+  } catch (error: any) {
+    if (!retainMutationIntent(error)) createTrackIntent.value = undefined;
+    window.$message.error(error?.message ?? "轨道创建失败");
+    return;
+  }
   // await getGenerateData();
   emit("getData");
   activeTrackIndex.value = trackList.value.length - 1;

@@ -15,6 +15,8 @@
       </t-button>
     </t-space>
 
+    <t-alert v-if="activeRunId" theme="info" style="margin-top: 10px" :message="`事件提取已启动（运行 ${activeRunId.slice(0, 8)}），可稍后刷新查看。`" />
+
     <div class="data">
       <t-table
         style="margin-top: 10px"
@@ -74,6 +76,7 @@
 import axios from "@/utils/axios";
 import dayjs from "dayjs";
 import projectStore from "@/stores/project";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const { project } = storeToRefs(projectStore());
 // 分页信息
 const pagination = ref({
@@ -86,7 +89,7 @@ const loading = ref(false);
 // 选中行
 const selectedRowKeys = ref<Array<string | number>>([]);
 // 事件数据
-const eventData = ref<{ id: number; eventName: string; chapters: string; detail: string; createTime: number }[]>([]);
+const eventData = ref<{ id: number; eventName: string; chapters: number[]; detail: string; createTime: number; version: number }[]>([]);
 //表格表头
 const columns = ref<Record<string, unknown>[]>([
   {
@@ -104,6 +107,7 @@ const columns = ref<Record<string, unknown>[]>([
 ]);
 // 生成状态
 const isGenerating = ref(false);
+const activeRunId = ref("");
 
 // 处理分页变化
 function handlePageChange(pageInfo: { current: number; pageSize: number }) {
@@ -131,39 +135,58 @@ async function getEvents() {
 }
 // 处理删除事件
 function handleDelete(row: Record<string, unknown>) {
+  if (!Number.isSafeInteger(Number(row.version)) || Number(row.version) < 0) {
+    window.$message.error("事件版本尚未加载，请刷新后重试");
+    return getEvents();
+  }
   const dialog = DialogPlugin.confirm({
     header: $t('workbench.novel.event.msg.deleteHeader'),
     body: $t('workbench.novel.event.msg.deleteBody'),
     onConfirm: async () => {
-      await axios.post("/novel/event/deletEvent", {
-        id: row.id,
-      });
-      getEvents();
-      window.$message.success($t('workbench.novel.event.msg.deleteSuccess'));
-      dialog.destroy();
+      try {
+        await axios.post("/novel/event/deletEvent", {
+          id: row.id,
+          projectId: Number(project.value?.id),
+          expectedVersion: Number(row.version),
+          idempotencyKey: createIdempotencyKey("novel-event-delete"),
+        });
+        getEvents();
+        window.$message.success($t('workbench.novel.event.msg.deleteSuccess'));
+        dialog.destroy();
+      } catch (error) {
+        window.$message.error((error as Error).message);
+      }
     },
   });
 }
 
 // 开始生成事件
-function generateEvent() {
+async function generateEvent() {
   isGenerating.value = true;
   loading.value = true;
-  axios
-    .post("/novel/event/generateEvents", {
-      projectId: project.value?.id,
-    })
-    .then((response) => {
-      getEvents();
-      window.$message.success($t('workbench.novel.event.msg.generateSuccess'));
-    })
-    .catch((e) => {
-      window.$message.error((e as Error).message);
-    })
-    .finally(() => {
-      isGenerating.value = false;
-      loading.value = false;
+  try {
+    const { data: chapters } = await axios.post("/novel/getNovelData", { projectId: Number(project.value?.id) });
+    if (!Array.isArray(chapters) || !chapters.length) {
+      window.$message.warning("请先导入原文章节");
+      return;
+    }
+    const { data } = await axios.post("/novel/event/generateEvents", {
+      projectId: Number(project.value?.id),
+      novelIds: chapters.map((chapter: any) => Number(chapter.id)),
+      expectedVersions: Object.fromEntries(chapters.map((chapter: any) => [String(chapter.id), Number(chapter.version)])),
+      concurrentCount: 2,
+      idempotencyKey: createIdempotencyKey("novel-events"),
     });
+    activeRunId.value = String(data?.run?.id ?? "");
+    getEvents();
+    window.$message.success("事件提取已开始，可稍后刷新查看");
+  } catch (e) {
+    window.$message.error((e as Error).message);
+    getEvents();
+  } finally {
+    isGenerating.value = false;
+    loading.value = false;
+  }
 }
 // 重新生成事件
 function regenerateEvents() {
@@ -181,16 +204,28 @@ function handleSelectChange(value: Array<string | number>, context: { selectedRo
 // 批量删除
 function handleBatchDelete() {
   if (selectedRowKeys.value.length === 0) return;
+  const selected = eventData.value.filter((row) => selectedRowKeys.value.includes(row.id));
+  if (selected.length !== selectedRowKeys.value.length || selected.some((row) => !Number.isSafeInteger(row.version))) {
+    window.$message.error("事件版本尚未加载，请刷新后重试");
+    return getEvents();
+  }
   const dialog = DialogPlugin.confirm({
     header: $t('workbench.novel.event.msg.batchDeleteHeader'),
     body: $t('workbench.novel.event.msg.batchDeleteBody', { count: selectedRowKeys.value.length }),
     onConfirm: async () => {
-      await axios.post("/novel/event/batchDeleteEvent", {
-        ids: selectedRowKeys.value,
-      });
-      getEvents();
-      window.$message.success($t('workbench.novel.event.msg.batchDeleteSuccess'));
-      dialog.destroy();
+      try {
+        await axios.post("/novel/event/batchDeleteEvent", {
+          projectId: Number(project.value?.id),
+          items: selected.map((row) => ({ id: row.id, expectedVersion: row.version })),
+          idempotencyKey: createIdempotencyKey("novel-event-delete"),
+        });
+        selectedRowKeys.value = [];
+        getEvents();
+        window.$message.success($t('workbench.novel.event.msg.batchDeleteSuccess'));
+        dialog.destroy();
+      } catch (error) {
+        window.$message.error((error as Error).message);
+      }
     },
   });
 }
