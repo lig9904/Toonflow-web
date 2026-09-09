@@ -101,6 +101,7 @@
         <t-button theme="danger" size="small" :disabled="!storyboard.length || !selectedIds.length" @click="handleDeleteSelected">批量删除</t-button>
       </div>
       <div class="ac" style="gap: 10px">
+        <t-button block variant="outline" @click="openManualAdd">新增分镜</t-button>
         <t-button block @click="previewAll" :disabled="!storyboard.length">{{ $t("workbench.production.node.storyboard.gridPreview") }}</t-button>
         <t-button block @click="batchGenerateImage" :disabled="!storyboard.length || !selectedIds.length" :loading="generateLoading">
           {{ $t("workbench.production.node.storyboard.generateImage") }}
@@ -111,6 +112,19 @@
         </t-button> -->
       </div>
     </div>
+    <t-dialog v-model:visible="manualAddVisible" header="新增分镜" :confirm-btn="{ content: '保存', loading: manualAdding }" :cancel-btn="'取消'" @confirm="addManualStoryboard">
+      <t-form label-align="top">
+        <t-form-item label="提示词">
+          <t-textarea v-model="manualAddForm.prompt" :autosize="{ minRows: 3, maxRows: 6 }" placeholder="请输入分镜提示词" />
+        </t-form-item>
+        <t-form-item label="画面描述">
+          <t-textarea v-model="manualAddForm.videoDesc" :autosize="{ minRows: 3, maxRows: 6 }" placeholder="请输入画面描述（可选）" />
+        </t-form-item>
+        <t-form-item label="时长（秒）">
+          <t-input-number v-model="manualAddForm.duration" :min="1" :max="60" />
+        </t-form-item>
+      </t-form>
+    </t-dialog>
     <editImage v-model="visible" v-if="visible" :flowData="currentRow" type="storyboard" @save="save" />
     <t-image-viewer
       v-model:visible="previewVisible"
@@ -159,6 +173,9 @@ const props = defineProps<{
 const storyboard = defineModel<Storyboard[]>({ required: true });
 
 const visible = ref(false);
+const manualAddVisible = ref(false);
+const manualAdding = ref(false);
+const manualAddForm = reactive({ prompt: "", videoDesc: "", duration: 5 });
 const previewVisible = ref(false);
 const previewImages = ref<string[]>([]);
 const gridScale = useLocalStorage("storyboardGridScale", 1);
@@ -340,6 +357,53 @@ async function ensureStoryboardWritable(item: Storyboard): Promise<boolean> {
 function reviewStateLabel(value: StoryboardReviewState | undefined): string {
   return { draft: "草稿", pending: "待审核", approved: "已通过", revision: "需修改" }[value ?? "draft"];
 }
+function openManualAdd() {
+  manualAddForm.prompt = "";
+  manualAddForm.videoDesc = "";
+  manualAddForm.duration = 5;
+  manualAddVisible.value = true;
+}
+
+async function addManualStoryboard() {
+  if (manualAdding.value) return;
+  const prompt = manualAddForm.prompt.trim();
+  const duration = manualAddForm.duration;
+  const projectId = project.value?.id;
+  const scriptId = episodesId.value;
+  if (!prompt) {
+    window.$message.warning("请输入分镜提示词");
+    return;
+  }
+  if (!Number.isFinite(duration) || duration < 1 || duration > 60) {
+    window.$message.warning("请输入 1 到 60 秒的时长");
+    return;
+  }
+  if (projectId == null || scriptId == null) {
+    window.$message.error("当前项目或剧本尚未准备好");
+    return;
+  }
+  manualAdding.value = true;
+  try {
+    const { data } = await axios.post("/production/storyboard/addStoryboard", {
+      projectId,
+      scriptId,
+      prompt,
+      duration,
+      videoDesc: manualAddForm.videoDesc.trim(),
+      src: null,
+    });
+    if (project.value?.id === projectId && episodesId.value === scriptId) {
+      await productionAgent.refreshStoryboard(data.id, scriptId);
+    }
+    manualAddVisible.value = false;
+    window.$message.success("分镜已新增");
+  } catch (error) {
+    window.$message.error(getProductionStateErrorMessage(error, "新增分镜失败"));
+  } finally {
+    manualAdding.value = false;
+  }
+}
+
 async function batchGenerateImage() {
   if (!selectedIds.value.length) return window.$message.warning("请先选择分镜面板");
   const writable = await Promise.all(
