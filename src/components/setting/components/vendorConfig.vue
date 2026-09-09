@@ -9,8 +9,8 @@
         </t-button>
       </div>
       <div class="listContent" v-loading="loading">
-        <t-menu v-model="activeVendorId" theme="light" v-if="vendorList.length > 0">
-          <t-menu-item v-for="(item, index) in vendorList" :key="index" :value="item.id" @click="activeVendorId = item.id" style="position: relative">
+        <t-menu v-model:value="activeVendorId" theme="light" v-if="vendorList.length > 0">
+          <t-menu-item v-for="item in vendorList" :key="item.id" :value="item.id" style="position: relative">
             <template #icon v-if="isValidBase64(item.icon)">
               <t-avatar size="24px" shape="round" :image="item.icon" />
             </template>
@@ -85,7 +85,7 @@
               {{ $t("settings.vendor.addManually") }}
             </t-button>
           </div>
-          <t-card v-for="(item, index) in vendorModels" :key="index" class="modelCard">
+          <t-card v-for="item in vendorModels" :key="item.modelName" class="modelCard">
             <div class="topInfo jb ac">
               <div class="modelCardNameWrap">
                 <t-avatar v-if="getModelLogo(item.modelName)" size="24px" shape="round" :image="getModelLogo(item.modelName)!" />
@@ -348,6 +348,7 @@ import type { UploadFile } from "tdesign-vue-next";
 import { LoadingPlugin } from "tdesign-vue-next";
 import settingStore from "@/stores/setting";
 import { resolveThemeMode } from "@/utils/theme";
+import { createVendorSaveQueue } from "@/utils/vendorSaveQueue";
 import TextModelTest from "./vendorTest/TextModelTest.vue";
 import ImageModelTest from "./vendorTest/ImageModelTest.vue";
 import VideoModelTest from "./vendorTest/VideoModelTest.vue";
@@ -491,26 +492,44 @@ const audioOptions: { label: string; value: "optional" | false | true }[] = [
 const vendorList = ref<VendorItem[]>([]);
 
 const loading = ref(false);
+let vendorListRequestId = 0;
 async function getVendorList() {
+  const requestId = ++vendorListRequestId;
+  const savedAtRequestStart = new Map(lastSavedSnapshotByVendor);
   loading.value = true;
   try {
     const res = await axios.post("/setting/vendorConfig/getVendorList");
+    if (requestId !== vendorListRequestId) return;
     vendorList.value = res.data.map((item: any) => {
+      const draft = draftByVendor.get(item.id);
+      const local = vendorList.value.find((vendor) => vendor.id === item.id);
+      const savedSinceRequest = lastSavedSnapshotByVendor.get(item.id) !== savedAtRequestStart.get(item.id);
       return {
         ...item,
         enable: item.enable,
+        inputValues: draft
+          ? { ...draft.payload.inputValues }
+          : savedSinceRequest && local
+            ? { ...local.inputValues }
+            : { ...item.inputValues },
       };
+    });
+    vendorList.value.forEach((vendor) => {
+      if (!draftByVendor.has(vendor.id) && !vendorSaveQueue.isSaving(vendor.id)) {
+        lastSavedSnapshotByVendor.set(vendor.id, JSON.stringify(buildVendorUpdatePayload(vendor)));
+      }
     });
 
     if (vendorList.value.length && !vendorList.value.some((v) => v.id === activeVendorId.value)) {
       activeVendorId.value = vendorList.value[0].id;
     }
   } catch (err: any) {
+    if (requestId !== vendorListRequestId) return;
     window.$message.error(`${$t("settings.vendor.msg.getVendorListFailed")}${err.message}`);
   } finally {
+    if (requestId !== vendorListRequestId) return;
     loading.value = false;
     nextTick(() => {
-      lastSavedSnapshot.value = currentVendorSnapshot.value;
       autoSaveReady.value = true;
     });
   }
@@ -532,12 +551,16 @@ const codeDialogVisible = ref(false);
 const vendorCode = ref(VENDOR_CODE_TEMPLATE);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const updating = ref(false);
-const autoUpdating = ref(false);
 const autoSaveReady = ref(false);
-const lastSavedSnapshot = ref("");
 const AUTO_SAVE_DELAY = 700;
-let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
-let pendingAutoSave = false;
+interface AutoSaveJob {
+  vendorId: string;
+  payload: ReturnType<typeof buildVendorUpdatePayload>;
+  snapshot: string;
+}
+const draftByVendor = new Map<string, AutoSaveJob>();
+const lastSavedSnapshotByVendor = new Map<string, string>();
+const autoSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 // ── 测试弹窗状态 ──
 const testingModel = ref<VendorModel | null>(null);
@@ -580,7 +603,7 @@ function getModelLogo(modelName: string): string | null {
 function buildVendorUpdatePayload(vendor: VendorItem) {
   return {
     id: vendor.id,
-    inputValues: vendor.inputValues,
+    inputValues: { ...vendor.inputValues },
   };
 }
 
@@ -589,65 +612,52 @@ const currentVendorSnapshot = computed(() => {
   return JSON.stringify(buildVendorUpdatePayload(currentVendor.value));
 });
 
-function scheduleAutoSave() {
-  if (autoSaveTimer) {
-    clearTimeout(autoSaveTimer);
-  }
-  autoSaveTimer = setTimeout(() => {
-    void handleAutoUpdateVendor();
+const vendorSaveQueue = createVendorSaveQueue<ReturnType<typeof buildVendorUpdatePayload>>(async (_vendorId, payload) => {
+  await axios.post("/setting/vendorConfig/updateVendorInputs", payload);
+});
+
+function scheduleAutoSave(job: AutoSaveJob) {
+  // Preserve edits immediately, including the debounce window before any request starts.
+  draftByVendor.set(job.vendorId, job);
+  const previous = autoSaveTimers.get(job.vendorId);
+  if (previous) clearTimeout(previous);
+  const timer = setTimeout(() => {
+    autoSaveTimers.delete(job.vendorId);
+    void enqueueVendorSave(job, false);
   }, AUTO_SAVE_DELAY);
+  autoSaveTimers.set(job.vendorId, timer);
 }
 
-async function handleAutoUpdateVendor() {
-  if (!currentVendor.value || !autoSaveReady.value || loading.value) return;
-
-  const snapshot = currentVendorSnapshot.value;
-  if (!snapshot || snapshot === lastSavedSnapshot.value) return;
-
-  if (autoUpdating.value) {
-    pendingAutoSave = true;
+async function enqueueVendorSave(job: AutoSaveJob, showSuccess: boolean) {
+  draftByVendor.set(job.vendorId, job);
+  if (job.snapshot === lastSavedSnapshotByVendor.get(job.vendorId) && !vendorSaveQueue.isSaving(job.vendorId)) {
+    draftByVendor.delete(job.vendorId);
     return;
   }
-
-  autoUpdating.value = true;
   try {
-    await axios.post("/setting/vendorConfig/updateVendorInputs", buildVendorUpdatePayload(currentVendor.value));
-    lastSavedSnapshot.value = snapshot;
+    await vendorSaveQueue.enqueue(job.vendorId, job.payload);
+    if (draftByVendor.get(job.vendorId)?.snapshot === job.snapshot) {
+      draftByVendor.delete(job.vendorId);
+      lastSavedSnapshotByVendor.set(job.vendorId, job.snapshot);
+      if (showSuccess && activeVendorId.value === job.vendorId) window.$message.success($t("settings.vendor.msg.vendorConfigUpdated"));
+    }
   } catch (err: any) {
     window.$message.error(`${$t("settings.vendor.msg.updateFailed")}${err.message}`);
-  } finally {
-    autoUpdating.value = false;
-    if (pendingAutoSave) {
-      pendingAutoSave = false;
-      scheduleAutoSave();
-    }
   }
 }
 
 watch(
   currentVendorSnapshot,
   (snapshot) => {
-    if (!snapshot || !autoSaveReady.value || loading.value) return;
-    if (snapshot === lastSavedSnapshot.value) return;
-    scheduleAutoSave();
+    if (!snapshot || !autoSaveReady.value) return;
+    const vendor = currentVendor.value;
+    if (!vendor) return;
+    if (snapshot === lastSavedSnapshotByVendor.get(vendor.id)) return;
+    scheduleAutoSave({ vendorId: vendor.id, payload: buildVendorUpdatePayload(vendor), snapshot });
   },
   { flush: "post" },
 );
 
-watch(
-  activeVendorId,
-  () => {
-    if (autoSaveTimer) {
-      clearTimeout(autoSaveTimer);
-      autoSaveTimer = null;
-    }
-    pendingAutoSave = false;
-    nextTick(() => {
-      lastSavedSnapshot.value = currentVendorSnapshot.value;
-    });
-  },
-  { flush: "post" },
-);
 const id = ref<string>();
 function handleAddVendor() {
   addMode.value = "importAdd";
@@ -1050,19 +1060,17 @@ function handleDeleteVendor() {
     },
   });
 }
-function onBlurFn() {
-  axios
-    .post("/setting/vendorConfig/updateVendorInputs", {
-      id: currentVendor.value?.id,
-      inputValues: currentVendor.value?.inputValues,
-    })
-    .then(() => {
-      window.$message.success($t("settings.vendor.msg.vendorConfigUpdated"));
-      getVendorList();
-    })
-    .catch((err) => {
-      window.$message.error(`${$t("settings.vendor.msg.updateFailed")}${err.message}`);
-    });
+async function onBlurFn() {
+  const vendor = currentVendor.value;
+  if (!vendor) return;
+  const timer = autoSaveTimers.get(vendor.id);
+  if (timer) {
+    clearTimeout(timer);
+    autoSaveTimers.delete(vendor.id);
+  }
+  const payload = buildVendorUpdatePayload(vendor);
+  const snapshot = JSON.stringify(payload);
+  await enqueueVendorSave({ vendorId: vendor.id, payload, snapshot }, true);
 }
 //是否启用供应商
 function onChange(item: any, val: number) {
