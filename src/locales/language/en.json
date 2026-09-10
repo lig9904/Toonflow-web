@@ -1695,5 +1695,12 @@
   "settings.memory.modelMap.editRefeshWord": "rebind",
   "settings.memory.modelMap.delPrompt": "delete",
   "settings.vendor.testModel": "test",
-  "storyboard.assets.addStoryboardFailed": "Failed to add storyboard"
+  "storyboard.assets.addStoryboardFailed": "Failed to add storyboard",
+  "builtinAgent": {
+    "mediaBudgetLabel": "Generation limit for this run:",
+    "imageLabel": "Image",
+    "videoLabel": "Video",
+    "zeroUnlimitedHint": "0 means unlimited",
+    "unlimitedLabel": "unlimited"
+  }
 }

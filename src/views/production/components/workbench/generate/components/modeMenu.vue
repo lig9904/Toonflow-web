@@ -7,11 +7,13 @@
       <t-select size="small" class="mode" :value="modelParmas.mode" :onChange="handleBeforeChange">
         <t-option v-for="(item, index) in modeList" :key="index" :value="item.value" :label="item.label"></t-option>
       </t-select>
+      <t-tag v-if="followsReferenceRatio" size="small" variant="light" theme="warning">画幅跟随参考图</t-tag>
       <t-button
         size="small"
         variant="outline"
         :theme="modelParmas.audio ? 'success' : 'danger'"
         class="audio"
+        :title="modelParmas.audio ? '音频已开启' : '音频关闭（按当前选择生成无声视频）'"
         :disabled="modeOptions.audio !== 'optional'"
         @click="modelParmas.audio = !modelParmas.audio">
         <template #icon>
@@ -25,9 +27,15 @@
           placement="top"
           overlay-class-name="resDurPickerPopup"
           :overlay-inner-style="{ padding: '16px', borderRadius: '8px' }">
-          <t-tag class="btn" variant="outline">{{ modelParmas.resolution }}·{{ modelParmas.duration }}s</t-tag>
+          <t-tag class="btn" variant="outline" :title="durationNotice || undefined">
+            {{ modelParmas.resolution }}·{{ modelParmas.duration }}s · #{{ trackIndex + 1 }} 脚本{{ trackScriptDuration }}s
+          </t-tag>
           <template #content>
             <div class="resolutionDurationPicker">
+              <div class="durationContext" :class="{ warning: Boolean(durationNotice) }">
+                {{ durationNotice || `当前片段 #${trackIndex + 1}：脚本 ${trackScriptDuration}s，生成 ${modelParmas.duration}s` }}
+              </div>
+              <div class="durationContext muted">手动选择仅影响当前片段；批量生成按每个片段自己的脚本时长匹配。</div>
               <div
                 v-if="availableResolutions.length"
                 class="pickerSection">
@@ -78,6 +86,9 @@ const props = defineProps<{
   modeList: { value: string; label: string }[];
   trackId: number | undefined;
   trackVersion: number | undefined;
+  trackIndex: number;
+  trackScriptDuration: number;
+  durationNotice?: string;
   projectId: number | string | undefined;
   scriptId: number | undefined;
 }>();
@@ -90,7 +101,9 @@ const modelParmas = defineModel<ModelSetting>({
     audio: false,
   },
 });
-const availableDurations = computed(() => videoDurations(props.modeOptions));
+const availableDurations = computed(() => videoDurations(props.modeOptions).filter((duration) => duration >= props.trackScriptDuration));
+const followsReferenceRatio = computed(() => props.modeOptions.referenceRatio === "adaptive"
+  && ["singleImage", "startFrameOptional", "endFrameOptional", "startEndRequired"].includes(String(modelParmas.value.mode)));
 const availableResolutions = computed(() => videoResolutions(props.modeOptions, modelParmas.value.duration));
 watch(availableResolutions, (values) => { if (values.length && !values.includes(modelParmas.value.resolution)) modelParmas.value.resolution = values[0]; }, { immediate: true });
 const emit = defineEmits<{
@@ -163,6 +176,18 @@ async function updateDuration(newDuration: number) {
 <style lang="scss">
 .resolutionDurationPicker {
   min-width: 240px;
+  .durationContext {
+    margin-bottom: 10px;
+    color: var(--td-text-color-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+    &.warning {
+      color: var(--td-error-color-6);
+    }
+    &.muted {
+      color: var(--td-text-color-placeholder);
+    }
+  }
   .pickerSection {
     margin-bottom: 16px;
 

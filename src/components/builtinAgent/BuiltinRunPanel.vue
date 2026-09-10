@@ -10,10 +10,10 @@
       <t-button theme="primary" :loading="starting" :disabled="!prompt.trim() || starting" @click="start">开始运行</t-button>
     </div>
     <div class="authorizationRow">
-      <span>当前范围生成授权：</span>
-      <label>图片 <t-input-number v-model="imageGenerations" :min="0" :max="100" theme="column" /></label>
-      <label>视频 <t-input-number v-model="videoGenerations" :min="0" :max="100" theme="column" /></label>
-      <span class="muted">默认 0</span>
+      <span>{{ $t("builtinAgent.mediaBudgetLabel") }}</span>
+      <label>{{ $t("builtinAgent.imageLabel") }} <t-input-number v-model="imageGenerations" :min="0" :max="100" theme="column" /></label>
+      <label>{{ $t("builtinAgent.videoLabel") }} <t-input-number v-model="videoGenerations" :min="0" :max="100" theme="column" /></label>
+      <span class="muted">{{ $t("builtinAgent.zeroUnlimitedHint") }}</span>
     </div>
 
     <div v-if="scopeRuns.length" class="runList">
@@ -36,8 +36,8 @@
         <span>{{ progressText }}</span>
       </div>
       <div class="usageRow">
-        <span>图片 {{ selectedRun.imageGenerations ?? 0 }}/{{ selectedRun.limits.maxImageGenerations }}</span>
-        <span>视频 {{ selectedRun.videoGenerations ?? 0 }}/{{ selectedRun.limits.maxVideoGenerations }}</span>
+        <span>{{ mediaUsageText(selectedRun, "image") }}</span>
+        <span>{{ mediaUsageText(selectedRun, "video") }}</span>
         <span>执行者：{{ executionUserLabel }}</span>
       </div>
       <div v-if="builtinUsesIndependentOutput(selectedRun)" class="muted">各步骤独立调用模型 · 文本累计 {{ selectedRun.outputTokens ?? 0 }} tokens</div>
@@ -68,6 +68,7 @@ import userStore from "@/stores/user";
 import {
   builtinScopeKey,
   builtinHumanQuestion,
+  builtinHasUnlimitedMediaBudget,
   builtinUsesIndependentOutput,
   isBuiltinRunTerminal,
   type BuiltinAgentType,
@@ -75,6 +76,7 @@ import {
   type BuiltinRunScope,
   type BuiltinRunStatus,
   type BuiltinRunView,
+  type BuiltinMediaGenerationKind,
   type BuiltinThinkLevel,
 } from "@/types/builtinAgent";
 
@@ -136,6 +138,14 @@ const runIssues = computed(() => {
   return Array.isArray(result?.issues) ? result.issues.map((issue) => issue.message).filter(Boolean).slice(0, 20) : [];
 });
 const showComposer = computed(() => props.showComposer !== false);
+
+function mediaUsageText(run: BuiltinRunView, kind: BuiltinMediaGenerationKind): string {
+  const label = kind === "image" ? $t("builtinAgent.imageLabel") : $t("builtinAgent.videoLabel");
+  const used = kind === "image" ? run.imageGenerations ?? 0 : run.videoGenerations ?? 0;
+  if (builtinHasUnlimitedMediaBudget(run, kind)) return `${label} ${used}/${$t("builtinAgent.unlimitedLabel")}`;
+  const limit = kind === "image" ? run.limits.maxImageGenerations : run.limits.maxVideoGenerations;
+  return `${label} ${used}/${limit}`;
+}
 
 function statusLabel(status: BuiltinRunStatus, run?: BuiltinRunView): string {
   const outcome = (run?.result as { outcome?: string } | null)?.outcome;

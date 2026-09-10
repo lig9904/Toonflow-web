@@ -11,6 +11,9 @@
         :modeOptions="modeOptions"
         :trackId="currentTrack?.id"
         :trackVersion="currentTrack?.version"
+        :trackIndex="activeTrackIndex"
+        :trackScriptDuration="currentTrackSourceDuration"
+        :durationNotice="currentDurationNotice"
         :projectId="project?.id"
         :scriptId="episodesId"
         :modeList="modeList"
@@ -37,6 +40,7 @@
           v-if="currentTrack"
           :active-track-index="activeTrackIndex"
           v-model:current-track="currentTrack"
+          :generating="generateVideoPending"
           @refresh="getGenerateData"
           @generate="generateVideo" />
       </div>
@@ -48,7 +52,11 @@
         :image-list="imageList"
         @change="trackChange"
         :modelParmas="modelParmas"
+        :storyboard-list="storyboardList"
         :clampDuration="clampDuration"
+        :sourceDuration="sourceDurationForTrack"
+        :resolveDuration="resolveDuration"
+        :supportsResolution="supportsResolution"
         @getData="getGenerateData" />
     </div>
   </div>
@@ -62,7 +70,7 @@ import modeMenu from "./components/modeMenu.vue";
 import videoCard from "./components/video.vue";
 import "@/views/production/components/workbench/type/type";
 import axios from "@/utils/axios";
-import { nearestVideoDuration, videoResolutions } from "@/utils/mediaQuality";
+import { resolveVideoDuration, storyboardTrackDuration, videoResolutions, type VideoDurationChoice } from "@/utils/mediaQuality";
 import projectStore from "@/stores/project";
 import userStore from "@/stores/user";
 import { useLocalStorage } from "@vueuse/core";
@@ -78,8 +86,10 @@ const cacheStore = imageListCacheStore();
 const generationIntents = createGenerationIntentStore<{ videoId: number }>();
 const generateVideoPending = ref(false);
 const promptMutationIntents = new Map<number, { signature: string; key: string }>();
+const promptGenerationIntents = new Map<number, { signature: string; key: string }>();
 const persistedTrackPrompts = new Map<number, string>();
 const promptConflictVersions = new Map<number, number>();
+const durationOverrides = useLocalStorage<Record<string, number>>(`toonflow:video-duration-overrides:${userStore().user?.id}:${project.value?.id}:${episodesId.value}`, {});
 const { getCache, setCache, removeCache, initCacheFromTrackList, warmUpUrls } = cacheStore;
 const { urlMap } = storeToRefs(cacheStore);
 
@@ -104,12 +114,6 @@ const modelParmas = useLocalStorage<ModelSetting>(`toonflow:video-settings:${use
 
 const storyboardList = ref<StoryboardItem[]>([]); // 分镜列表
 
-/** 排序优先级：assets有图=0，storyboard有图=1，无图=2 */
-function getImageItemPriority(item: UploadItem): number {
-  if (item.src) return item.sources === "assets" ? 0 : 1;
-  return 2;
-}
-
 const imageList = computed({
   get(): UploadItem[] {
     // 触发对 urlMap 的依赖追踪，当 warmUpUrls 更新 urlMap 后自动重新计算
@@ -122,13 +126,11 @@ const imageList = computed({
     if (pid != null && sid != null && trackId != null) {
       const cached = getCache(pid, sid, trackId);
 
-      if (cached?.length) {
-        return [...cached].sort((a, b) => getImageItemPriority(a) - getImageItemPriority(b));
-      }
+      if (cached?.length) return orderReferenceItems(cached);
     }
     const medias = currentTrack.value?.medias;
     if (!medias?.length) return [];
-    return [...(medias as UploadItem[])].sort((a, b) => getImageItemPriority(a) - getImageItemPriority(b));
+    return orderReferenceItems(medias as UploadItem[]);
   },
   set(val: UploadItem[]) {
     if (currentTrack.value) {
@@ -143,6 +145,12 @@ const imageList = computed({
     }
   },
 });
+
+function orderReferenceItems(items: UploadItem[]): UploadItem[] {
+  // Reference order is semantic: in frame modes it identifies start/end,
+  // and in multi-reference modes it determines @图片/@视频/@音频 numbering.
+  return [...items];
+}
 
 function modeChange(newVal: string) {
   if (newVal == modelParmas.value.mode) return;
@@ -202,7 +210,52 @@ const currentTrack = computed({
 
 /** 将时长限制在模型支持的范围内 */
 function clampDuration(trackDuration: number): number {
-  return nearestVideoDuration(modeOptions.value, trackDuration);
+  return resolveDuration(trackDuration).duration ?? trackDuration;
+}
+
+function resolveDuration(trackDuration: number): VideoDurationChoice {
+  return resolveVideoDuration(modeOptions.value, trackDuration);
+}
+
+function supportsResolution(duration: number): boolean {
+  const choice = resolveDuration(duration);
+  return choice.duration != null && videoResolutions(modeOptions.value, choice.duration).includes(modelParmas.value.resolution);
+}
+
+function sourceDurationForTrack(track: TrackItem | undefined): number {
+  if (!track) return 0;
+  return storyboardTrackDuration(storyboardList.value, track.id, track.duration);
+}
+
+function durationOverrideKey(track: TrackItem | undefined): string | undefined {
+  if (!track?.id || !modelParmas.value.model) return undefined;
+  return `${modelParmas.value.model}:${track.id}`;
+}
+
+const currentTrackSourceDuration = computed(() => sourceDurationForTrack(currentTrack.value));
+const currentDurationChoice = computed(() => resolveDuration(currentTrackSourceDuration.value));
+const currentDurationNotice = computed(() => {
+  const source = currentTrackSourceDuration.value;
+  const choice = currentDurationChoice.value;
+  if (!source) return "";
+  if (choice.resolution === "unavailable") return "当前模型未提供可用的视频时长，请重新选择模型";
+  if (choice.resolution === "exceeds_maximum") return `脚本 ${source}s 超出当前模型最大时长，请拆分分镜或选择支持更长时长的模型`;
+  if (modelParmas.value.duration !== choice.duration) return `脚本 ${source}s，当前片段手动生成 ${modelParmas.value.duration}s（仅影响当前片段）`;
+  if (choice.resolution === "exact") return "";
+  return `脚本 ${source}s，当前片段生成 ${choice.duration}s（按模型支持值向上匹配）`;
+});
+
+function syncCurrentDuration() {
+  if (!currentTrack.value || currentTrackSourceDuration.value <= 0) return;
+  const choice = currentDurationChoice.value;
+  const override = durationOverrideKey(currentTrack.value);
+  const candidate = override ? durationOverrides.value[override] : undefined;
+  if (choice.duration != null && candidate != null && candidate >= choice.duration && resolveDuration(candidate).duration === candidate) {
+    modelParmas.value.duration = candidate;
+    return;
+  }
+  if (override) delete durationOverrides.value[override];
+  modelParmas.value.duration = choice.duration ?? currentTrackSourceDuration.value;
 }
 
 watch(
@@ -228,7 +281,7 @@ watch(
       const drMap = data.durationResolutionMap;
       if (Array.isArray(drMap) && drMap.length > 0) {
 
-        modelParmas.value.duration = clampDuration(modelParmas.value.duration);
+        syncCurrentDuration();
         const resolutions = videoResolutions(data, modelParmas.value.duration);
         if (!resolutions.includes(modelParmas.value.resolution)) modelParmas.value.resolution = resolutions[0] ?? "";
       }
@@ -311,12 +364,18 @@ async function getGenerateData() {
     trackList.value.forEach((track) => persistedTrackPrompts.set(track.id, track.prompt ?? ""));
   }
 
-  modelParmas.value.duration = clampDuration(data.trackList?.[activeTrackIndex.value]?.duration);
+  syncCurrentDuration();
 }
 /** 提示词失焦时保存到后端 */
 function handleDurationUpdated(update: { trackId: number; version: number }) {
   const track = trackList.value.find((item) => item.id === update.trackId);
   if (track && Number.isSafeInteger(update.version)) track.version = update.version;
+  if (track && currentTrack.value?.id === track.id) {
+    const auto = resolveDuration(sourceDurationForTrack(track));
+    const key = durationOverrideKey(track);
+    if (key && auto.duration != null && modelParmas.value.duration > auto.duration && resolveDuration(modelParmas.value.duration).duration === modelParmas.value.duration) durationOverrides.value[key] = modelParmas.value.duration;
+    else if (key) delete durationOverrides.value[key];
+  }
 }
 
 async function handlePromptBlur() {
@@ -384,19 +443,26 @@ async function genText() {
     else info = filtered;
   }
   track.state = "生成中";
+  track.promptJobId = null;
+  const promptPayload = { projectId: project.value?.id, scriptId: episodesId.value, trackId: currentTrackId, info, model: modelParmas.value.model, mode: modelParmas.value.mode, expectedVersion: track.version };
+  const promptSignature = JSON.stringify(promptPayload);
+  const previousIntent = promptGenerationIntents.get(currentTrackId);
+  const promptIntent = previousIntent?.signature === promptSignature ? previousIntent : { signature: promptSignature, key: createIdempotencyKey("video-prompt") };
+  promptGenerationIntents.set(currentTrackId, promptIntent);
   try {
-    const { data } = await axios.post("/production/workbench/generateVideoPrompt", {
-      projectId: project.value?.id,
-      trackId: currentTrackId,
-      info: info,
-      model: modelParmas.value.model,
-      mode: modelParmas.value.mode,
-    });
+    const { data } = await axios.post("/production/workbench/generateVideoPrompt", { ...promptPayload, idempotencyKey: promptIntent.key });
+    if (data && typeof data === "object" && (data.state === "running" || data.state === "queued")) {
+      track.promptJobId = data.jobId ?? null;
+      return;
+    }
     track.prompt = data;
     track.state = "已完成";
+    promptGenerationIntents.delete(currentTrackId);
   } catch (e) {
     track.state = "生成失败";
     window.$message.error((e as Error)?.message ?? "提示词生成失败");
+    const status = Number((e as any)?.status ?? (e as any)?.response?.status);
+    if (Number.isSafeInteger(status) && status < 500) promptGenerationIntents.delete(currentTrackId);
   }
 }
 function trackChange(prevIndex?: number) {
@@ -423,7 +489,7 @@ function trackChange(prevIndex?: number) {
   if (modelParmas.value.mode == "singleImage" && imageList.value.length > 1) {
     imageList.value = imageList.value.slice(0, 1);
   }
-  modelParmas.value.duration = clampDuration(trackList.value?.[activeTrackIndex.value]?.duration);
+  syncCurrentDuration();
 }
 /** 监听当前轨道的 medias 变化，实时同步到缓存 */
 watch(
@@ -457,6 +523,17 @@ async function generateVideo() {
       dlg.destroy();
       if (generateVideoPending.value) return;
       const track = currentTrack.value;
+      const sourceDuration = currentTrackSourceDuration.value;
+      const durationChoice = resolveDuration(sourceDuration);
+      if (durationChoice.duration == null) {
+        window.$message.warning(`当前片段脚本时长 ${sourceDuration}s 超出模型支持范围，请拆分分镜或选择支持更长时长的模型`);
+        return;
+      }
+      const selectedDuration = resolveDuration(modelParmas.value.duration);
+      if (selectedDuration.duration !== modelParmas.value.duration || modelParmas.value.duration < durationChoice.duration! || !supportsResolution(modelParmas.value.duration)) {
+        window.$message.warning("当前片段的时长或清晰度不是模型支持的组合，请从顶部下拉重新选择");
+        return;
+      }
       const requestData = {
         projectId: project.value?.id,
         scriptId: episodesId.value,
@@ -481,6 +558,7 @@ async function generateVideo() {
         model: modelParmas.value.model,
         mode: modelParmas.value.mode,
         resolution: modelParmas.value.resolution,
+        // A manually selected supported value applies to this active track only.
         duration: modelParmas.value.duration,
         audio: modelParmas.value.audio,
         trackId: track.id,
@@ -528,7 +606,7 @@ const hasGenerateVideoIds = computed(() => {
     .flatMap((i) => i);
 });
 const hasGeneratePromptIds = computed(() => {
-  const trackIds = trackList.value.filter((t) => t.state == "生成中").map((t) => t.id);
+      const trackIds = trackList.value.filter((t) => t.state == "生成中").map((t) => t.id);
   return trackIds;
 });
 /** 查询所有视频列表，并检测生成完成/失败状态 */
@@ -569,14 +647,23 @@ async function getTrackPromptList() {
     projectId: project.value?.id,
     scriptId: episodesId.value ?? 0,
     trackIds: hasGeneratePromptIds.value,
+    jobIds: trackList.value.filter((track) => track.state === "生成中" && track.promptJobId).map((track) => track.promptJobId),
   });
   if (data && data.length) {
-    data.forEach((item: { id: number; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string }) => {
+    data.forEach((item: { id: number; jobId?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number }) => {
       const findData = trackList.value.find((t) => t.id == item.id);
       if (findData) {
+        const localDraft = findData.prompt !== (persistedTrackPrompts.get(findData.id) ?? "");
+        if (item.jobId) findData.promptJobId = item.jobId;
         findData.state = item.state;
-        findData.prompt = item?.prompt ?? "";
+        if ((item.state === "已完成" || item.state === "生成中") && !localDraft) findData.prompt = item?.prompt ?? "";
+        if (item.prompt != null && (item.state === "已完成" || item.state === "生成失败")) persistedTrackPrompts.set(findData.id, item.prompt);
+        if (Number.isSafeInteger(item.version) && Number(item.version) >= 0) findData.version = Number(item.version);
         findData.reason = item?.reason ?? "";
+        if (item.state === "已完成" || item.state === "生成失败") {
+          const intent = promptGenerationIntents.get(findData.id);
+          if (intent) promptGenerationIntents.delete(findData.id);
+        }
         if (item.state === "生成失败") {
           window.$message.error(`提示词生成失败，${item.reason ?? "未知原因"}`);
         }

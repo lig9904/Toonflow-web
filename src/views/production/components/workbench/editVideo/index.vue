@@ -92,6 +92,7 @@
             </t-button>
           </template> -->
           <template #scale-append>
+            <span class="timelineSaveStatus" :class="`is-${autoSaveStatus}`">{{ autoSaveStatusLabel }}</span>
             <t-button theme="danger" @click="handleExport" :loading="isExporting" :title="$t('workbench.production.editVideo.exportProject')">
               <template #icon><i-export size="16" style="margin-right: 4px" /></template>
               {{ isExporting ? $t("workbench.production.editVideo.rendering") : $t("workbench.production.editVideo.exportVideo") }}
@@ -107,6 +108,8 @@
 import mediaLibrary from "./mediaLibrary.vue";
 import videoPreview from "./videoPreview.vue";
 import propertyPanel from "./propertyPanel.vue";
+import axios from "@/utils/axios";
+import { createIdempotencyKey } from "@/utils/idempotency";
 import { Splitpanes, Pane } from "splitpanes";
 import "vue-clip-track/style.css";
 import {
@@ -128,6 +131,7 @@ import type { MediaItem, AudioItem } from "./utils/mediaData";
 import { getDefaultDuration, findOrCreateTrackWithSpace } from "./utils/trackHelper";
 import { loadVideoClipThumbnails, loadAudioClipWaveform, loadInitialAudioWaveforms } from "./utils/mediaLoader";
 import { findAdjacentClipsAtTime, addTransitionBetweenClips } from "./utils/transitionHelper";
+import { getSourceDuration, getTracksTimelineEnd } from "./utils/timeline";
 
 const props = withDefaults(
   defineProps<{
@@ -136,6 +140,10 @@ const props = withDefaults(
     initialMediaItems?: MediaItem[];
     initialAudioItems?: AudioItem[];
     initialImageItems?: MediaItem[];
+    projectId?: number;
+    scriptId?: number;
+    initialTimelineVersion?: number;
+    initialTimelineSaved?: boolean;
     canvasWidth?: number;
     canvasHeight?: number;
   }>(),
@@ -223,6 +231,129 @@ const clipConfigs = ref({
 const videoTrackRef = ref();
 const videoPreviewRef = ref<InstanceType<typeof videoPreview>>();
 const isExporting = ref(false);
+const timelineVersion = ref(props.initialTimelineVersion ?? 0);
+const autoSaveStatus = ref<"saved" | "saving" | "pending" | "error">(props.initialTimelineSaved === false ? "pending" : "saved");
+const autoSaveStatusLabel = computed(() => ({ saved: "已保存", saving: "保存中", pending: "待保存", error: "保存失败" })[autoSaveStatus.value]);
+let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let autoSaveInFlight = false;
+let autoSaveDirty = false;
+let hydratingTimeline = true;
+let unmountingTimeline = false;
+let saveIntent: { signature: string; key: string } | null = null;
+
+function localDraftKey() {
+  const identity = typeof localStorage !== "undefined" ? localStorage.getItem("toonflow.user") : null;
+  let userId = "session";
+  try { userId = String(JSON.parse(identity ?? "{}").id ?? "session"); } catch { /* use session fallback */ }
+  return `toonflow.editTimeline:${userId}:${props.projectId ?? "unknown"}:${props.scriptId ?? "unknown"}`;
+}
+
+function saveLocalDraft(timeline: ReturnType<typeof timelinePayload>, baseVersion: number) {
+  if (!props.projectId || !props.scriptId || typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(localDraftKey(), JSON.stringify({ projectId: props.projectId, scriptId: props.scriptId, baseVersion, timeline, updatedAt: Date.now() }));
+  } catch (error) {
+    console.error("Failed to persist edit timeline draft:", error);
+  }
+}
+
+function readLocalDraft(): { baseVersion: number; timeline: { tracks?: unknown[] } } | null {
+  if (!props.projectId || !props.scriptId || typeof localStorage === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(localDraftKey());
+    if (!raw) return null;
+    const value = JSON.parse(raw);
+    if (Number(value?.projectId) !== Number(props.projectId) || Number(value?.scriptId) !== Number(props.scriptId) || !Array.isArray(value?.timeline?.tracks)) return null;
+    return { baseVersion: Number(value.baseVersion) || 0, timeline: value.timeline };
+  } catch {
+    return null;
+  }
+}
+
+function clearLocalDraftIfCurrent(signature: string) {
+  if (typeof localStorage === "undefined") return;
+  try {
+    const raw = localStorage.getItem(localDraftKey());
+    if (!raw) return;
+    const value = JSON.parse(raw);
+    if (JSON.stringify(value?.timeline ?? {}) === signature) localStorage.removeItem(localDraftKey());
+  } catch { /* ignore malformed stale drafts */ }
+}
+
+function timelinePayload() {
+  return { tracks: JSON.parse(JSON.stringify(tracksStore.tracks)) };
+}
+
+async function flushTimelineAutosave() {
+  if (!props.projectId || !props.scriptId || hydratingTimeline || !autoSaveDirty || autoSaveInFlight) return;
+  autoSaveInFlight = true;
+  autoSaveDirty = false;
+  autoSaveStatus.value = "saving";
+  const timeline = timelinePayload();
+  saveLocalDraft(timeline, timelineVersion.value);
+  const signature = JSON.stringify(timeline);
+  if (!saveIntent || saveIntent.signature !== signature) saveIntent = { signature, key: createIdempotencyKey("edit-timeline") };
+  try {
+    const response: any = await axios.post("/production/workbench/saveEditTimeline", {
+      projectId: props.projectId,
+      scriptId: props.scriptId,
+      expectedVersion: timelineVersion.value,
+      idempotencyKey: saveIntent.key,
+      timeline,
+    });
+    const result = response?.data ?? response;
+    timelineVersion.value = Number(result.version ?? timelineVersion.value);
+    clearLocalDraftIfCurrent(signature);
+    saveIntent = null;
+    autoSaveStatus.value = "saved";
+  } catch (error: any) {
+    autoSaveDirty = true;
+    autoSaveStatus.value = "error";
+    if (error?.status === 409 || error?.code === "VERSION_CONFLICT") window.$message.error("时间线已被其他成员修改，已保留本地编辑");
+    else console.error("Failed to autosave edit timeline:", error);
+  } finally {
+    autoSaveInFlight = false;
+    if (autoSaveDirty && autoSaveStatus.value !== "error") {
+      if (unmountingTimeline) void flushTimelineAutosave();
+      else scheduleTimelineAutosave();
+    }
+  }
+}
+
+function scheduleTimelineAutosave() {
+  if (!props.projectId || !props.scriptId || hydratingTimeline) return;
+  autoSaveStatus.value = "pending";
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => {
+    autoSaveTimer = null;
+    void flushTimelineAutosave();
+  }, 700);
+}
+
+watch(
+  () => tracksStore.tracks,
+  () => {
+    if (hydratingTimeline) return;
+    autoSaveDirty = true;
+    saveLocalDraft(timelinePayload(), timelineVersion.value);
+    scheduleTimelineAutosave();
+  },
+  { deep: true, flush: "post" },
+);
+
+watch(
+  () => props.initialTimelineSaved,
+  (saved) => {
+    if (saved && !autoSaveDirty && !autoSaveInFlight) autoSaveStatus.value = "saved";
+  },
+);
+
+watch(
+  () => props.initialTimelineVersion,
+  (version) => {
+    if (!autoSaveDirty && !autoSaveInFlight && Number.isFinite(Number(version))) timelineVersion.value = Number(version);
+  },
+);
 
 async function handleExport() {
   if (!videoPreviewRef.value) return;
@@ -270,7 +401,9 @@ async function handleDropMedia(mediaData: any, trackId: string, startTime: numbe
     const { track } = findOrCreateTrackWithSpace(tracksStore, mediaData.type, startTime, duration, trackId);
     if (!track) return;
 
-    let clip: Partial<Clip> = {
+    // Timeline metadata intentionally extends vue-clip-track's Clip shape;
+    // keep it local to the editor and do not widen the shared package types.
+    let clip: any = {
       id: generateId("clip-"),
       trackId: track.id,
       startTime: normalizeTime(startTime),
@@ -279,17 +412,27 @@ async function handleDropMedia(mediaData: any, trackId: string, startTime: numbe
 
     if (mediaData.type === "video") {
       const sourceUrl = mediaData.sourceUrl || mediaData.url || mediaData.id;
+      const sourceDuration = getSourceDuration(mediaData, duration);
       clip = {
         ...clip,
         type: "video",
         name: mediaData.name,
         endTime: normalizeTime(startTime + duration),
         sourceUrl,
-        originalDuration: duration,
+        // `originalDuration` describes the generated source. The timeline
+        // interval above describes the planned shot duration.
+        originalDuration: sourceDuration,
         trimStart: 0,
-        trimEnd: duration,
+        trimEnd: Math.min(duration, sourceDuration),
         playbackRate: 1,
         thumbnails: mediaData.thumbnails || [],
+        sourceDuration,
+        plannedDuration: duration,
+        sourceRef: mediaData.sourceRef || {
+          id: mediaData.videoId ?? mediaData.assetId ?? mediaData.id,
+          trackId: mediaData.videoTrackId ?? mediaData.trackId,
+          version: mediaData.videoVersion ?? mediaData.version,
+        },
       } as Partial<MediaClip>;
 
       tracksStore.addClip(track.id, clip as Clip);
@@ -312,6 +455,7 @@ async function handleDropMedia(mediaData: any, trackId: string, startTime: numbe
         trimEnd: duration,
         playbackRate: 1,
         thumbnails: mediaData.thumbnail ? [mediaData.thumbnail] : [],
+        plannedDuration: duration,
       };
 
       tracksStore.addClip(track.id, clip as Clip);
@@ -319,18 +463,26 @@ async function handleDropMedia(mediaData: any, trackId: string, startTime: numbe
       return;
     } else if (mediaData.type === "audio") {
       const sourceUrl = mediaData.sourceUrl || mediaData.url || mediaData.id;
+      const sourceDuration = getSourceDuration(mediaData, duration);
       clip = {
         ...clip,
         type: "audio",
         name: mediaData.name,
         endTime: normalizeTime(startTime + duration),
         sourceUrl,
-        originalDuration: duration,
+        originalDuration: sourceDuration,
         trimStart: 0,
-        trimEnd: duration,
+        trimEnd: Math.min(duration, sourceDuration),
         playbackRate: 1,
         volume: 1,
         waveformData: mediaData.waveformData || [],
+        sourceDuration,
+        plannedDuration: duration,
+        sourceRef: mediaData.sourceRef || {
+          id: mediaData.audioId ?? mediaData.assetId ?? mediaData.id,
+          trackId: mediaData.audioTrackId ?? mediaData.trackId,
+          version: mediaData.audioVersion ?? mediaData.version,
+        },
       } as Partial<MediaClip>;
 
       tracksStore.addClip(track.id, clip as Clip);
@@ -424,8 +576,23 @@ function onTransitionAdded(transitionClip: any, beforeClipId: string, afterClipI
   playbackStore.seekTo(transitionClip.startTime);
 }
 
+function restoreLocalDraftIfSafe() {
+  const draft = readLocalDraft();
+  if (!draft) return;
+  if (draft.baseVersion < timelineVersion.value) {
+    autoSaveStatus.value = "error";
+    window.$message.warning("发现旧版本地时间线草稿，服务器版本较新，未自动覆盖服务器内容");
+    return;
+  }
+  tracksStore.reset();
+  for (const track of draft.timeline.tracks ?? []) tracksStore.addTrack(track as Track);
+  timelineVersion.value = draft.baseVersion;
+  autoSaveDirty = true;
+  autoSaveStatus.value = "pending";
+}
+
 // 初始化轨道数据
-function initializeTracks() {
+async function initializeTracks() {
   tracksStore.reset();
 
   if (props.initialTracks.length > 0) {
@@ -433,15 +600,24 @@ function initializeTracks() {
       tracksStore.addTrack(track);
     });
   }
+  restoreLocalDraftIfSafe();
 
-  playbackStore.setDuration(60 * 5);
+  // The old editor seeded a five-minute duration. That value became the
+  // playback range even when the actual project was a 60-second timeline.
+  // Derive it from the supplied plan and use 60 seconds only for an empty
+  // demo timeline.
+  const plannedDuration = getTracksTimelineEnd(props.initialTracks);
+  playbackStore.setDuration(plannedDuration > 0 ? plannedDuration : 60);
   playbackStore.seekTo(0);
   historyStore.initialize();
-  loadInitialAudioWaveforms(tracksStore);
+  await loadInitialAudioWaveforms(tracksStore);
+  nextTick(() => {
+    hydratingTimeline = false;
+  });
 }
 
-onMounted(() => {
-  initializeTracks();
+onMounted(async () => {
+  await initializeTracks();
 
   if (previewWrapperRef.value) {
     resizeObserver = new ResizeObserver((entries) => {
@@ -453,6 +629,13 @@ onMounted(() => {
     });
     resizeObserver.observe(previewWrapperRef.value);
   }
+});
+
+onBeforeUnmount(() => {
+  unmountingTimeline = true;
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  if (autoSaveDirty) saveLocalDraft(timelinePayload(), timelineVersion.value);
+  void flushTimelineAutosave();
 });
 
 onUnmounted(() => {
@@ -482,6 +665,16 @@ onUnmounted(() => {
     height: 100%;
     border: 1px solid var(--td-border-level-1-color);
     border-radius: 10px;
+  }
+
+  .timelineSaveStatus {
+    margin-right: 8px;
+    font-size: 12px;
+    color: var(--td-text-color-secondary);
+  }
+
+  .timelineSaveStatus.is-error {
+    color: var(--td-error-color);
   }
 }
 :deep(.ruler__cursor-handle) {

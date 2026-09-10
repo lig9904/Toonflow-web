@@ -1,4 +1,5 @@
 import { generateId } from "vue-clip-track";
+import { getTimelineDuration } from "./timeline";
 
 const TRACK_NAME_KEYS: Record<string, string> = {
   video: 'workbench.production.track.video',
@@ -11,24 +12,9 @@ const TRACK_NAME_KEYS: Record<string, string> = {
   effect: 'workbench.production.track.effect',
 };
 
-const DEFAULT_DURATIONS: Record<string, number> = {
-  video: 5,
-  image: 5,
-  audio: 30,
-  subtitle: 3,
-  text: 3,
-  sticker: 3,
-  filter: 3,
-  effect: 3,
-  transition: 3,
-};
-
 /** 根据素材类型获取默认时长 */
 export function getDefaultDuration(mediaType: string, mediaData: any): number {
-  if (mediaData.duration && mediaData.duration > 0) {
-    return mediaData.duration;
-  }
-  return DEFAULT_DURATIONS[mediaType] || 3;
+  return getTimelineDuration(mediaType, mediaData);
 }
 
 /** 检查轨道在指定时间范围是否有足够空间（不重叠） */

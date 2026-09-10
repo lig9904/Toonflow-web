@@ -117,6 +117,7 @@ const hasSprites = ref(false);
 const isPlaying = ref(false);
 const currentTime = ref(0); // 微秒
 const duration = ref(playbackStore.duration * 1e6); // 转换为微秒
+const lastExportMeta = ref<{ filename: string; bytes: number; duration: number; createdAt: number } | null>(null);
 
 // 防止循环更新的标志
 let isUpdatingFromCanvas = false;
@@ -146,6 +147,9 @@ const clipSnapshotMap = new Map<
     volume: number;
   }
 >();
+// Keep failed media loads visible to export validation. A missing/failed clip
+// must not disappear from the timeline and produce a partial movie.
+const clipErrorMap = new Map<string, string>();
 
 // 存储 clip 所属轨道的信息（用于计算 zIndex）
 const clipTrackMap = new Map<string, { trackId: string; trackOrder: number }>();
@@ -805,6 +809,41 @@ function setupSpriteListeners(clipId: string, sprite: VisibleSprite) {
   });
 }
 
+/** Apply an exact media trim window. Boundary trims must not be silently ignored. */
+async function trimMediaClipToWindow<T extends {
+  ready: Promise<unknown>;
+  meta: { duration: number };
+  split: (time: number) => Promise<[T, T]>;
+  destroy: () => void;
+}>(sourceClip: T, requestedStart: number, requestedEnd: number, label: string): Promise<T> {
+  await sourceClip.ready;
+  const sourceDuration = sourceClip.meta.duration / 1e6;
+  if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) {
+    throw new Error(`${label} source duration is unavailable`);
+  }
+  const trimStart = Math.max(0, Math.min(requestedStart, sourceDuration));
+  const trimEnd = Math.max(trimStart, Math.min(requestedEnd, sourceDuration));
+  if (trimEnd - trimStart <= 0.001) {
+    throw new Error(`${label} trim range is empty (${trimStart.toFixed(3)}-${trimEnd.toFixed(3)}s)`);
+  }
+  let trimmed = sourceClip;
+  if (trimStart > 0.001) {
+    const [discard, keep] = await trimmed.split(trimStart * 1e6);
+    discard.destroy();
+    trimmed = keep;
+    await trimmed.ready;
+  }
+  const keepDuration = trimEnd - trimStart;
+  const currentDuration = trimmed.meta.duration / 1e6;
+  if (keepDuration < currentDuration - 0.001) {
+    const [keep, discard] = await trimmed.split(keepDuration * 1e6);
+    discard.destroy();
+    trimmed = keep;
+    await trimmed.ready;
+  }
+  return trimmed;
+}
+
 // 根据 clip 创建对应的 Sprite
 async function createSpriteFromClip(clip: Clip, track: Track): Promise<VisibleSprite | null> {
   try {
@@ -813,9 +852,6 @@ async function createSpriteFromClip(clip: Clip, track: Track): Promise<VisibleSp
     let sprite: VisibleSprite | null = null;
     let originalWidth = 0;
     let originalHeight = 0;
-
-    // 安全边界阈值（秒），避免在边界处 split 导致找不到采样点
-    const SPLIT_SAFETY_MARGIN = 0.1;
 
     if (clip.type === "video" && mediaClip.sourceUrl) {
       // 创建视频 Sprite
@@ -834,44 +870,14 @@ async function createSpriteFromClip(clip: Clip, track: Track): Promise<VisibleSp
       // 处理 trimStart 和 trimEnd
       // trimStart: 视频素材内部的起始时间（秒）
       // trimEnd: 视频素材内部的结束时间（秒）
-      const trimStart = mediaClip.trimStart || 0;
-      const trimEnd = mediaClip.trimEnd || mp4Clip.meta.duration / 1e6; // 转换为秒
+      const trimStart = Number.isFinite(Number(mediaClip.trimStart)) ? Number(mediaClip.trimStart) : 0;
+      const rawTrimEnd = Number(mediaClip.trimEnd);
+      const trimEnd = Number.isFinite(rawTrimEnd) && rawTrimEnd > 0 ? rawTrimEnd : mp4Clip.meta.duration / 1e6;
       const playbackRate = mediaClip.playbackRate || 1;
-      const originalDuration = mp4Clip.meta.duration / 1e6; // 秒
-
-      // 使用 split 方法处理 trim
-      // trimStart: 从视频的第 trimStart 秒开始播放
-      // trimEnd: 播放到视频的第 trimEnd 秒
-      // 只有当 trimStart > 安全边界 时才需要分割前面的部分
-      if (trimStart > SPLIT_SAFETY_MARGIN && trimStart < originalDuration - SPLIT_SAFETY_MARGIN) {
-        // console.log(`[Video] Splitting at trimStart=${trimStart}s (${trimStart * 1e6} us)`);
-        try {
-          const [beforePart, afterPart] = await mp4Clip.split(trimStart * 1e6);
-          beforePart.destroy(); // 销毁前面不需要的部分
-          mp4Clip = afterPart;
-          await mp4Clip.ready;
-          // console.log(`[Video] After trimStart split, new duration=${mp4Clip.meta.duration / 1e6}s`);
-        } catch (splitError) {
-          // console.warn(`[Video] Failed to split at trimStart, using original clip:`, splitError);
-        }
-      }
-
-      // 计算需要保留的时长（从新 clip 的起始算起）
-      const keepDuration = trimEnd - trimStart;
-      const currentDuration = mp4Clip.meta.duration / 1e6;
-      // 只有当需要裁剪的时长明显小于当前时长时才分割（留出安全边界）
-      if (keepDuration > SPLIT_SAFETY_MARGIN && keepDuration < currentDuration - SPLIT_SAFETY_MARGIN) {
-        // console.log(`[Video] Splitting to keep duration=${keepDuration}s`);
-        try {
-          const [keepPart, discardPart] = await mp4Clip.split(keepDuration * 1e6);
-          discardPart.destroy(); // 销毁后面不需要的部分
-          mp4Clip = keepPart;
-          await mp4Clip.ready;
-          // console.log(`[Video] After trimEnd split, final duration=${mp4Clip.meta.duration / 1e6}s`);
-        } catch (splitError) {
-          // console.warn(`[Video] Failed to split at trimEnd, using current clip:`, splitError);
-        }
-      }
+      const probedSourceDuration = mp4Clip.meta.duration / 1e6;
+      (mediaClip as any).sourceDuration = probedSourceDuration;
+      if (Number((mediaClip as any).plannedDuration) > probedSourceDuration) (mediaClip as any).sourceShortfall = true;
+      mp4Clip = await trimMediaClipToWindow(mp4Clip, trimStart, trimEnd, `Video clip ${clip.id}`);
 
       // 设置滤镜和特效的 tickInterceptor
       const interceptor = createFilteredTickInterceptor(clip);
@@ -901,35 +907,16 @@ async function createSpriteFromClip(clip: Clip, track: Track): Promise<VisibleSp
       await audioClip.ready;
 
       // 处理音频的 trim
-      const trimStart = mediaClip.trimStart || 0;
-      const trimEnd = mediaClip.trimEnd || audioClip.meta.duration / 1e6;
+      const trimStart = Number.isFinite(Number(mediaClip.trimStart)) ? Number(mediaClip.trimStart) : 0;
+      const rawTrimEnd = Number(mediaClip.trimEnd);
+      const trimEnd = Number.isFinite(rawTrimEnd) && rawTrimEnd > 0 ? rawTrimEnd : audioClip.meta.duration / 1e6;
       const playbackRate = mediaClip.playbackRate || 1;
-      const originalDuration = audioClip.meta.duration / 1e6;
-
-      // 使用 split 方法处理 trim（带安全边界检查）
-      if (trimStart > SPLIT_SAFETY_MARGIN && trimStart < originalDuration - SPLIT_SAFETY_MARGIN) {
-        try {
-          const [beforePart, afterPart] = await audioClip.split(trimStart * 1e6);
-          beforePart.destroy();
-          audioClip = afterPart;
-          await audioClip.ready;
-        } catch (splitError) {
-          // console.warn(`[Audio] Failed to split at trimStart, using original clip:`, splitError);
-        }
-      }
-
-      const keepDuration = trimEnd - trimStart;
-      const currentDuration = audioClip.meta.duration / 1e6;
-      if (keepDuration > SPLIT_SAFETY_MARGIN && keepDuration < currentDuration - SPLIT_SAFETY_MARGIN) {
-        try {
-          const [keepPart, discardPart] = await audioClip.split(keepDuration * 1e6);
-          discardPart.destroy();
-          audioClip = keepPart;
-          await audioClip.ready;
-        } catch (splitError) {
-          // console.warn(`[Audio] Failed to split at trimEnd, using current clip:`, splitError);
-        }
-      }
+      const probedSourceDuration = audioClip.meta.duration / 1e6;
+      (mediaClip as any).sourceDuration = probedSourceDuration;
+      if (Number((mediaClip as any).plannedDuration) > probedSourceDuration) (mediaClip as any).sourceShortfall = true;
+      // Apply the exact trim window. Split failures are allowed to abort
+      // sprite creation instead of silently exporting the wrong media.
+      audioClip = await trimMediaClipToWindow(audioClip, trimStart, trimEnd, `Audio clip ${clip.id}`);
 
       sprite = new VisibleSprite(audioClip);
 
@@ -1096,9 +1083,9 @@ async function createSpriteFromClip(clip: Clip, track: Track): Promise<VisibleSp
     // console.log(`[Sprite] Set zIndex for clip ${clip.id}: ${sprite.zIndex} (track order: ${track.order})`);
 
     return sprite;
-  } catch (error) {
-    // console.error(`Failed to create sprite for clip ${clip.id}:`, error);
-    return null;
+  } catch (error: any) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to load clip ${clip.id}${clip.name ? ` (${clip.name})` : ""}: ${reason}`);
   }
 }
 
@@ -1112,6 +1099,8 @@ async function syncClipsToCanvas() {
     return;
   }
   isSyncing = true;
+
+  try {
 
   // 首先检测转场关联关系
   detectTransitions();
@@ -1147,6 +1136,7 @@ async function syncClipsToCanvas() {
       clipSpriteMap.delete(clipId);
       clipSnapshotMap.delete(clipId);
       clipTrackMap.delete(clipId);
+      clipErrorMap.delete(clipId);
       // console.log(`Removed sprite for clip: ${clipId}`);
     }
   }
@@ -1204,7 +1194,8 @@ async function syncClipsToCanvas() {
         const oldTrackInfo = clipTrackMap.get(clip.id);
         if (oldTrackInfo && oldTrackInfo.trackOrder !== track.order) {
           // 轨道顺序变化，更新 zIndex
-          const newZIndex = extClip.zIndex !== undefined ? extClip.zIndex : calculateZIndexFromTrackOrder(track.order);
+          const isSubtitleTrack = track.type === "subtitle" || track.type === "text";
+          const newZIndex = extClip.zIndex !== undefined ? extClip.zIndex : calculateZIndexFromTrackOrder(track.order, isSubtitleTrack);
           currentSprite.zIndex = newZIndex;
           clipTrackMap.set(clip.id, { trackId: track.id, trackOrder: track.order });
           // console.log( `[Sprite] Updated zIndex for clip ${clip.id}: ${newZIndex} (track order changed: ${oldTrackInfo.trackOrder} -> ${track.order})`, );
@@ -1218,15 +1209,22 @@ async function syncClipsToCanvas() {
       }
     } else {
       // 创建新的 sprite（传递 track 参数）
-      const sprite = await createSpriteFromClip(clip, track);
-      if (sprite) {
-        await avCanvas.addSprite(sprite);
-        clipSpriteMap.set(clip.id, sprite);
-        // 保存 clip 的关键属性快照
-        clipSnapshotMap.set(clip.id, getClipSnapshot(clip));
-        // 设置属性变化监听
-        setupSpriteListeners(clip.id, sprite);
-        // console.log(`Added sprite for clip: ${clip.id}`);
+      try {
+        const sprite = await createSpriteFromClip(clip, track);
+        if (sprite) {
+          await avCanvas.addSprite(sprite);
+          clipSpriteMap.set(clip.id, sprite);
+          clipErrorMap.delete(clip.id);
+          // 保存 clip 的关键属性快照
+          clipSnapshotMap.set(clip.id, getClipSnapshot(clip));
+          // 设置属性变化监听
+          setupSpriteListeners(clip.id, sprite);
+          // console.log(`Added sprite for clip: ${clip.id}`);
+        }
+      } catch (error: any) {
+        const reason = error instanceof Error ? error.message : String(error);
+        clipErrorMap.set(clip.id, reason);
+        console.error(`[Export] ${reason}`);
       }
     }
   }
@@ -1243,12 +1241,15 @@ async function syncClipsToCanvas() {
     avCanvasDebugData.duration = effectiveDuration;
   }
 
-  isSyncing = false;
+  } finally {
+    isSyncing = false;
 
-  // 如果有待处理的同步请求，再次同步
-  if (pendingSync) {
-    pendingSync = false;
-    await syncClipsToCanvas();
+    // 如果有待处理的同步请求，再次同步。Keep this outside the main
+    // operation so a failed media load cannot permanently lock the queue.
+    if (pendingSync) {
+      pendingSync = false;
+      await syncClipsToCanvas();
+    }
   }
 }
 
@@ -1437,6 +1438,7 @@ onUnmounted(() => {
   clipSpriteMap.clear();
   clipSnapshotMap.clear();
   clipTrackMap.clear();
+  clipErrorMap.clear();
 
   // 清理转场相关数据
   transitionInfoMap.clear();
@@ -1474,6 +1476,40 @@ function handleSeek(event: Event) {
   }
 }
 
+function validateExportTimeline() {
+  const invalidClips: string[] = [];
+
+  for (const track of tracksStore.tracks) {
+    if (track.visible === false) continue;
+    for (const clip of track.clips) {
+      if (!["video", "audio", "image", "sticker", "subtitle", "text"].includes(clip.type)) continue;
+      if (!Number.isFinite(clip.startTime) || !Number.isFinite(clip.endTime) || clip.endTime <= clip.startTime) {
+        invalidClips.push(clip.name || clip.id);
+        continue;
+      }
+      if (!clipSpriteMap.has(clip.id)) {
+        invalidClips.push(`${clip.name || clip.id} (not loaded)`);
+        continue;
+      }
+      const mediaClip = clip as MediaClip & { sourceDuration?: number; plannedDuration?: number; sourceShortfall?: boolean };
+      const sourceDuration = Number(mediaClip.sourceDuration ?? 0);
+      const plannedDuration = Number(mediaClip.plannedDuration ?? clip.endTime - clip.startTime);
+      if ((clip.type === "video" || clip.type === "audio") && sourceDuration > 0 && sourceDuration + 0.05 < plannedDuration) {
+        invalidClips.push(`${clip.name || clip.id} (素材 ${sourceDuration.toFixed(2)}s 小于计划 ${plannedDuration.toFixed(2)}s)`);
+      }
+
+    }
+  }
+
+  const failedLoads = [...clipErrorMap.values()];
+  if (failedLoads.length > 0) {
+    throw new Error(`Cannot export: media failed to load (${failedLoads.join("; ")})`);
+  }
+  if (invalidClips.length > 0) {
+    throw new Error(`Cannot export: invalid clip range (${invalidClips.join(", ")})`);
+  }
+}
+
 // 导出视频
 async function exportVideo() {
   if (!avCanvas) {
@@ -1482,6 +1518,7 @@ async function exportVideo() {
   if (clipSpriteMap.size === 0) {
     throw new Error($t('workbench.production.editVideo.noExportContent'));
   }
+  validateExportTimeline();
 
   // 导出前暂停播放
   if (isPlaying.value) {
@@ -1490,27 +1527,38 @@ async function exportVideo() {
     playbackStore.pause();
   }
 
-  const combinator = await avCanvas.createCombinator();
-  const chunks: Uint8Array[] = [];
-  const reader = combinator.output().getReader();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
+  let combinator: Awaited<ReturnType<AVCanvas["createCombinator"]>> | null = null;
+  try {
+    combinator = await avCanvas.createCombinator({ width: CANVAS_WIDTH.value, height: CANVAS_HEIGHT.value });
+    const chunks: Uint8Array[] = [];
+    const reader = combinator.output({ maxTime: getMaxSpriteDuration() }).getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) chunks.push(value);
+    }
+    const blob = new Blob(chunks as BlobPart[], { type: "video/mp4" });
+    const url = URL.createObjectURL(blob);
+    const filename = `WebAV-export-${Date.now()}.mp4`;
+    lastExportMeta.value = { filename, bytes: blob.size, duration: getMaxSpriteDuration() / 1e6, createdAt: Date.now() };
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Let the download start before releasing the object URL.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  } finally {
+    combinator?.destroy();
   }
-  const blob = new Blob(chunks as BlobPart[], { type: "video/mp4" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `WebAV-export-${Date.now()}.mp4`;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 // 暴露 AVCanvas 实例供外部使用
 defineExpose({
   avCanvas: computed(() => avCanvas),
   exportVideo,
+  lastExportMeta: computed(() => lastExportMeta.value),
   addSprite: async (sprite: any) => {
     if (avCanvas) {
       await avCanvas.addSprite(sprite);

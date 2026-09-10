@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { videoDurations, videoResolutions, nearestVideoDuration } from "../src/utils/mediaQuality.ts";
+import { videoDurations, videoResolutions, nearestVideoDuration, resolveVideoDuration, storyboardTrackDuration } from "../src/utils/mediaQuality.ts";
 import {
   builtinFingerprint,
   builtinHumanQuestion,
@@ -7,6 +7,8 @@ import {
   builtinProductionPreview,
   builtinArtifactView,
   builtinImageUrl,
+  builtinHasUnlimitedMediaBudget,
+  builtinMediaGenerationAllowed,
   builtinRunMessages,
   builtinScopeKey,
   dedupeBuiltinRunEvents,
@@ -57,6 +59,9 @@ assert.deepEqual(videoDurations(videoModel), [3, 5, 10]);
 assert.deepEqual(videoResolutions(videoModel, 10), ["720p"]);
 assert.deepEqual(videoResolutions(videoModel, 8), []);
 assert.equal(nearestVideoDuration(videoModel, 8), 10);
+assert.deepEqual(resolveVideoDuration(videoModel, 4), { requested: 4, duration: 5, resolution: "rounded_up" });
+assert.deepEqual(resolveVideoDuration(videoModel, 12), { requested: 12, resolution: "exceeds_maximum" });
+assert.equal(storyboardTrackDuration([{ trackId: 1, duration: "1.5" }, { trackId: 1, duration: 1.5 }, { trackId: 2, duration: 9 }], 1), 3);
 const previewRun = { ...run, agentType: "productionAgent" as const, status: "running" as const };
 const previewEvent: BuiltinRunEvent = { ...event(1, ""), type: "artifact.preview", data: { target: "scriptPlan", text: "Draft" } };
 assert.deepEqual(builtinProductionPreview(previewRun, [previewEvent], "scriptPlan"), { text: "Draft" });
@@ -66,6 +71,10 @@ assert.equal(builtinProductionPreview(previewRun, [previewEvent], "storyboardTab
 assert.equal(builtinUsesIndependentOutput({ ...run, agentType: "productionAgent", intent: { outputBudgetMode: "model_per_call" } }), true);
 assert.equal(builtinUsesIndependentOutput({ ...run, agentType: "productionAgent" }), false);
 assert.equal(builtinUsesIndependentOutput({ ...run, intent: { outputBudgetMode: "model_per_call" } }), false);
+assert.equal(builtinHasUnlimitedMediaBudget({ ...run, intent: { mediaBudgetMode: "zero_unlimited" } }, "image"), false, "positive image limits stay bounded");
+assert.equal(builtinHasUnlimitedMediaBudget({ ...run, limits: { ...run.limits, maxImageGenerations: 0 }, intent: { mediaBudgetMode: "zero_unlimited" } }, "image"), true);
+assert.equal(builtinMediaGenerationAllowed({ ...run, limits: { ...run.limits, maxImageGenerations: 0 }, intent: { mediaBudgetMode: "zero_unlimited" } }, "image"), true);
+assert.equal(builtinMediaGenerationAllowed({ ...run, limits: { ...run.limits, maxImageGenerations: 0 }, intent: undefined }, "image"), false, "legacy zero limits remain denied");
 const replay = dedupeBuiltinRunEvents(first, [event(2, "b"), event(3, "c")]);
 assert.deepEqual(replay.map((item) => item.sequence), [1, 2, 3], "replayed event sequences are deduplicated");
 assert.equal(builtinHumanQuestion({ question: "请选择第 3 镜" }), "请选择第 3 镜", "waiting question survives event replay");

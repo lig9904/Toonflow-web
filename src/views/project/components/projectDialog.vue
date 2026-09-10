@@ -56,7 +56,7 @@
                   placeholder="例如：先整理故事骨架，再生成第一版分集剧本" />
               </t-form-item>
               <t-checkbox v-model="formState.startBuiltinAgent">项目创建成功后交给内置 Agent</t-checkbox>
-              <div v-if="formState.startBuiltinAgent" class="handoffHint">只会在项目创建成功并拿到 projectId 后启动；图片和视频生成授权默认为 0。</div>
+              <div v-if="formState.startBuiltinAgent" class="handoffHint">只会在项目创建成功并拿到 projectId 后启动；本次生成数量上限中，0 表示不限制。</div>
             </template>
           </t-form>
         </div>

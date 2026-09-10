@@ -7,11 +7,11 @@
           <span class="selectedCount" v-if="checkedTrackIds.length">{{ $t("workbench.generate.selected") }} {{ checkedTrackIds.length }} 段</span>
         </div>
         <div class="right f ac">
-          <t-button size="small" variant="outline" @click="batchDownloadVideo">{{ $t("workbench.generate.batchDownloadVideo") }}</t-button>
-          <t-button size="small" variant="outline" @click="batchGenText" :loading="generateTextLoad">
+          <t-button size="small" variant="outline" :disabled="!checkedTrackIds.length" @click="batchDownloadVideo">{{ $t("workbench.generate.batchDownloadVideo") }}</t-button>
+          <t-button size="small" variant="outline" :disabled="!checkedTrackIds.length" @click="batchGenText" :loading="generateTextLoad">
             {{ $t("workbench.generate.batchGenerateText") }}
           </t-button>
-          <t-button size="small" variant="outline" @click="batchGenVideo" :loading="generateVideoLoad">
+          <t-button size="small" variant="outline" :disabled="!checkedTrackIds.length" @click="batchGenVideo" :loading="generateVideoLoad">
             {{ $t("workbench.generate.batchGenerateVideo") }}
           </t-button>
           <!-- <t-button size="small" variant="outline" @click="importVideo">{{ $t("workbench.generate.importVideo") }}</t-button> -->
@@ -31,6 +31,10 @@
             @change="(val: boolean) => toggleCheck(track.id, val)" />
           <t-tag class="indexTag" size="small">#{{ index + 1 }}</t-tag>
           <t-tag class="selectTag" theme="success" size="small" v-if="track.selectVideoId">已选择</t-tag>
+          <t-tag class="promptStateTag" size="small" :theme="promptStateTheme(track)">{{ promptStateLabel(track) }}</t-tag>
+          <t-tooltip v-if="track.state === '生成失败' && track.reason" :content="track.reason">
+            <span class="promptFailureMark">!</span>
+          </t-tooltip>
           <!-- 优先展示选中视频的首帧 -->
           <div class="thumbGroup" v-if="track.selectVideoId && getSelectedVideoSrc(track)">
             <img
@@ -81,13 +85,18 @@ import { createIdempotencyKey } from "@/utils/idempotency";
 const { otherSetting } = storeToRefs(settingStore());
 const generationIntents = createGenerationIntentStore();
 const batchRequestIntents = createGenerationIntentStore<Array<{ videoId: number; trackId: number; jobId?: string; reused?: boolean }>>();
+const promptGenerationIntents = new Map<number, { signature: string; key: string }>();
 const { project } = storeToRefs(projectStore());
 const { removeCache } = imageListCacheStore();
 const episodesId = inject<Ref<number>>("episodesId")!;
 const props = defineProps<{
   modelParmas: ModelSetting;
   imageList: UploadItem[];
+  storyboardList: Array<{ trackId?: number | string | null; duration?: number | string | null }>;
   clampDuration: (trackDuration: number) => number;
+  sourceDuration: (track: TrackItem | undefined) => number;
+  resolveDuration: (trackDuration: number) => { requested: number; duration?: number; resolution: string };
+  supportsResolution: (duration: number) => boolean;
 }>();
 const activeTrackIndex = defineModel("activeTrackIndex", {
   default: 0,
@@ -168,6 +177,20 @@ function changeIndex(index: number) {
   const prevIndex = activeTrackIndex.value;
   activeTrackIndex.value = index;
   emit("change", prevIndex);
+}
+
+function promptStateLabel(track: TrackItem): string {
+  if (track.state === "生成中") return "生成中";
+  if (track.state === "生成失败") return "生成失败";
+  if (track.state === "已完成" || track.prompt?.trim()) return "已完成";
+  return "待生成";
+}
+
+function promptStateTheme(track: TrackItem): "default" | "primary" | "success" | "danger" {
+  if (track.state === "生成中") return "primary";
+  if (track.state === "生成失败") return "danger";
+  if (track.state === "已完成" || track.prompt?.trim()) return "success";
+  return "default";
 }
 /** 删除轨道请求 */
 async function deleteTrack(index: number): Promise<boolean> {
@@ -282,6 +305,7 @@ async function batchDownloadVideo(): Promise<void> {
 }
 const generateTextLoad = ref(false);
 function batchGenText() {
+  if (generateTextLoad.value) return;
   generateTextLoad.value = true;
   const trackData: any[] = [];
   trackList.value.forEach((track, index) => {
@@ -296,18 +320,41 @@ function batchGenText() {
     trackData.push({
       trackId,
       info: info.filter((i) => typeof i.id === "number" && !isNaN(i.id)),
+      idempotencyKey: "pending",
     });
     track.state = "生成中";
   });
+  trackData.forEach((item) => {
+    const track = trackList.value.find((candidate) => candidate.id === item.trackId);
+    const signature = JSON.stringify({ projectId: project.value?.id, scriptId: episodesId.value, model: props.modelParmas.model, mode: props.modelParmas.mode, trackId: item.trackId, info: item.info, expectedVersion: track?.version });
+    const previous = promptGenerationIntents.get(item.trackId);
+    const intent = previous?.signature === signature ? previous : { signature, key: createIdempotencyKey("batch-video-prompt") };
+    promptGenerationIntents.set(item.trackId, intent);
+    item.idempotencyKey = intent.key;
+  });
+  const selectedIds = new Set(trackData.map((item) => item.trackId));
   axios
     .post("/production/workbench/batchGeneratePrompt", {
       projectId: project.value?.id,
+      scriptId: episodesId.value,
       trackData,
       model: props.modelParmas.model,
       mode: props.modelParmas.mode,
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
     })
     .then(({ data }) => {
+      if (Array.isArray(data)) {
+        data.forEach((item: { trackId: number; jobId?: string | null; state?: string; reason?: string | null }) => {
+          const track = trackList.value.find((candidate) => candidate.id === item.trackId);
+          if (!track) return;
+          track.promptJobId = item.jobId ?? null;
+          if (item.state === "failed") {
+            track.state = "生成失败";
+            track.reason = item.reason ?? "提示词任务预校验失败";
+            promptGenerationIntents.delete(track.id);
+          }
+        });
+      }
       window.$message.success("开始生成提示词");
       generateTextLoad.value = false;
       checkedTrackIds.value = [];
@@ -315,11 +362,12 @@ function batchGenText() {
     })
     .catch((e) => {
       window.$message.error(e?.message ?? "生成提示词失败");
-      trackList.value.forEach((i) => {
-        i.state = "生成失败";
+      trackList.value.filter((track) => selectedIds.has(track.id)).forEach((track) => {
+        track.state = "生成失败";
+        track.reason = e?.message ?? "批量请求失败";
       });
-    })
-    .finally(() => {});
+      generateTextLoad.value = false;
+    });
 }
 /**
  * 获取指定轨道的上传数据：
@@ -357,11 +405,17 @@ function batchGenVideo() {
       if (notHasPrompt.length) return window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
       generateVideoLoad.value = true;
 
+      const unsupportedTracks: number[] = [];
+      const unsupportedQualityTracks: number[] = [];
       const trackData = checkedTrackData.map((track) => {
         const trackId = track.id;
         const uploadData = props.modelParmas.mode === "text" ? [] : getTrackUploadInfo(track, true);
+        const sourceDuration = props.sourceDuration(track);
+        const durationChoice = props.resolveDuration(sourceDuration);
+        if (durationChoice.duration == null) unsupportedTracks.push(trackId);
+        else if (!props.supportsResolution(sourceDuration)) unsupportedQualityTracks.push(trackId);
         const intentPayload = {
-          duration: props.clampDuration(track.duration || props.modelParmas.duration),
+          duration: durationChoice.duration ?? sourceDuration,
           prompt: track.prompt,
           uploadData,
           trackId,
@@ -373,6 +427,16 @@ function batchGenVideo() {
           idempotencyKey: intent.key,
         };
       });
+      if (unsupportedTracks.length) {
+        window.$message.warning(`片段 ${unsupportedTracks.map((id) => trackList.value.findIndex((track) => track.id === id) + 1).join("、")} 的脚本时长超出模型上限，请拆分分镜或选择支持更长时长的模型`);
+        generateVideoLoad.value = false;
+        return;
+      }
+      if (unsupportedQualityTracks.length) {
+        window.$message.warning(`片段 ${unsupportedQualityTracks.map((id) => trackList.value.findIndex((track) => track.id === id) + 1).join("、")} 的脚本时长不支持当前清晰度，请从顶部下拉重新选择`);
+        generateVideoLoad.value = false;
+        return;
+      }
       const requestData = {
         projectId: project.value?.id,
         scriptId: episodesId.value,
@@ -446,6 +510,15 @@ function toggleCheck(trackId: number | undefined, val: boolean) {
 }
 
 // 轨道列表变化时，截取选中视频首帧（只监听 selectVideoId 和 videoList 变化，避免深度监听整个 trackList）
+watch(
+  () => trackList.value.map((track) => track.id),
+  (ids) => {
+    const available = new Set(ids);
+    checkedTrackIds.value = checkedTrackIds.value.filter((id) => available.has(id));
+    checkAll.value = ids.length > 0 && ids.every((id) => checkedTrackIds.value.includes(id));
+  },
+  { immediate: true },
+);
 watch(
   () => trackList.value.map((t) => ({ selectVideoId: t.selectVideoId, videoList: t.videoList })),
   () => {
@@ -522,6 +595,26 @@ watch(
         bottom: 4px;
         right: 4px;
         z-index: 1;
+      }
+      .promptStateTag {
+        position: absolute;
+        top: 4px;
+        left: 4px;
+        z-index: 2;
+      }
+      .promptFailureMark {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        z-index: 2;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: var(--td-error-color-6);
+        color: #fff;
+        font-size: 12px;
+        line-height: 16px;
+        text-align: center;
       }
       .thumbGroup {
         width: 100%;

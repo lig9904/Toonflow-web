@@ -14,6 +14,8 @@ export const builtinRunStatuses = [
 export type BuiltinRunStatus = (typeof builtinRunStatuses)[number];
 export type BuiltinControlAction = "pause" | "resume" | "cancel" | "takeover";
 export type BuiltinThinkLevel = 0 | 1 | 2 | 3;
+export type BuiltinMediaGenerationKind = "image" | "video";
+export type BuiltinMediaBudgetMode = "zero_unlimited";
 
 export interface BuiltinRunLimits {
   maxModelCalls: number;
@@ -55,6 +57,23 @@ export interface BuiltinRunView {
   errorMessage: string | null;
   result: unknown;
   intent?: unknown;
+}
+
+/** New public runs mark zero as unlimited; an old run without this marker keeps its recorded zero limit. */
+export function builtinHasUnlimitedMediaBudget(run: Pick<BuiltinRunView, "intent" | "limits">, kind: BuiltinMediaGenerationKind): boolean {
+  if (!run.intent || typeof run.intent !== "object" || Array.isArray(run.intent)) return false;
+  if ((run.intent as Record<string, unknown>).mediaBudgetMode !== "zero_unlimited") return false;
+  return (kind === "image" ? run.limits.maxImageGenerations : run.limits.maxVideoGenerations) === 0;
+}
+
+export function builtinMediaGenerationAllowed(
+  run: Pick<BuiltinRunView, "intent" | "limits" | "imageGenerations" | "videoGenerations">,
+  kind: BuiltinMediaGenerationKind,
+): boolean {
+  if (builtinHasUnlimitedMediaBudget(run, kind)) return true;
+  const used = kind === "image" ? run.imageGenerations ?? 0 : run.videoGenerations ?? 0;
+  const limit = kind === "image" ? run.limits.maxImageGenerations : run.limits.maxVideoGenerations;
+  return used < limit;
 }
 
 export function builtinUsesIndependentOutput(run: BuiltinRunView): boolean {

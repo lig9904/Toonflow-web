@@ -40,6 +40,10 @@
         :initial-media-items="mockMediaItems"
         :initial-audio-items="mockAudioItems"
         :initial-image-items="mockImageItems"
+        :project-id="Number(project?.id) || undefined"
+        :script-id="episodesId"
+        :initial-timeline-version="editTimelineVersion"
+        :initial-timeline-saved="editTimelineSaved"
         :canvas-width="canvasWidth"
         :canvas-height="canvasHeight"
         ref="editVideoRef" />
@@ -55,6 +59,7 @@
 <script setup lang="ts">
 import type { Ref } from "vue";
 import axios from "@/utils/axios";
+import { createIdempotencyKey } from "@/utils/idempotency";
 import preview from "./preview.vue";
 import generate from "./generate/index.vue";
 import editVideo from "./editVideo/index.vue";
@@ -130,59 +135,81 @@ function changeMenu(type: string) {
 }
 const episodesId = inject<Ref<number>>("episodesId")!;
 //查询剪辑素材
-function editFootage() {
-  axios
-    .post("/assets/getMaterialData", {
-      projectId: project.value?.id,
-      scriptId: episodesId.value ?? 0,
-    })
-    .then(({ data }) => {
-      const videoList = data.data.filter((item: any) => getMediaType(item.filePath) === "video");
-      const audioList = data.data.filter((item: any) => getMediaType(item.filePath) === "audio");
-      const imageList = data.data.filter((item: any) => getMediaType(item.filePath) === "image");
-      initialVideoItems.value = data.video.flatMap((item: any, index: number) => {
-        if (Array.isArray(item.video)) {
-          return item.video.map((subItem: any, subIndex: number) => ({
+async function editFootage() {
+  const sequence = ++footageLoadSequence;
+  const projectId = Number(project.value?.id);
+  const scriptId = Number(episodesId.value ?? 0);
+  if (!Number.isSafeInteger(projectId) || projectId <= 0 || !Number.isSafeInteger(scriptId) || scriptId <= 0) return;
+  try {
+    const [materialResponse, timelineResponse] = await Promise.all([
+      axios.post("/assets/getMaterialData", { projectId, scriptId }),
+      axios.post("/production/workbench/getEditTimeline", { projectId, scriptId }),
+    ]);
+    if (sequence !== footageLoadSequence) return;
+    const data = (materialResponse as any).data ?? materialResponse;
+    const saved = (timelineResponse as any).data ?? timelineResponse;
+    const materialRows = Array.isArray(data?.data) ? data.data : [];
+    const videoGroups = Array.isArray(data?.video) ? data.video : [];
+    const videoList = materialRows.filter((item: any) => getMediaType(item.filePath) === "video");
+    const audioList = materialRows.filter((item: any) => getMediaType(item.filePath) === "audio");
+    const imageList = materialRows.filter((item: any) => getMediaType(item.filePath) === "image");
+    initialVideoItems.value = videoGroups.flatMap((item: any, index: number) =>
+      Array.isArray(item.video)
+        ? item.video.map((subItem: any, subIndex: number) => ({
             id: `video-${subItem.id}`,
             type: "video",
             name: "#" + $t("workbench.production.wb.storyboardVideoName", { storyboard: index + 1, id: subIndex + 1 }),
-            duration: subItem.duration || 0,
+            duration: subItem.sourceDuration || 0,
+            sourceDuration: subItem.sourceDuration || 0,
+            plannedDuration: item.plannedDuration || 0,
+            sourceRef: subItem.sourceRef,
             icon: "🎬",
             color: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
             url: subItem.filePath,
-            selected: item.videoId == subItem.id ? true : false,
-          }));
-        }
-      });
-      mockMediaItems.value = videoList.map((item: any) => ({
-        id: `video-${item.id}`,
-        type: "video",
-        name: item.name,
-        duration: item.duration || 0,
-        icon: "🎥",
-        color: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-        url: item.filePath,
-        loading: true,
-      }));
-      mockAudioItems.value = audioList.map((item: any) => ({
-        id: `audio-${item.id}`,
-        type: "audio",
-        name: item.name,
-        duration: item.duration || 0,
-        url: item.filePath,
-        loading: true,
-      }));
-      mockImageItems.value = imageList.map((item: any) => ({
-        id: `image-${item.id}`,
-        type: "image",
-        name: item.name,
-        duration: item.duration || 5,
-        icon: "🖼️",
-        color: "linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)",
-        url: item.filePath,
-        loading: true,
-      }));
-    });
+            selected: item.videoId == subItem.id,
+          }))
+        : [],
+    ) as any;
+    mockMediaItems.value = videoList.map((item: any) => ({
+      id: `video-${item.id}`, type: "video", name: item.name, duration: item.duration || 0,
+      icon: "🎥", color: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)", url: item.filePath, loading: true,
+    }));
+    mockAudioItems.value = audioList.map((item: any) => ({ id: `audio-${item.id}`, type: "audio", name: item.name, duration: item.duration || 0, url: item.filePath, loading: true }));
+    mockImageItems.value = imageList.map((item: any) => ({
+      id: `image-${item.id}`, type: "image", name: item.name, duration: item.duration || 5,
+      icon: "🖼️", color: "linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)", url: item.filePath, loading: true,
+    }));
+
+    // A saved draft is authoritative. Initial storyboard assembly happens
+    // only once, when no persisted timeline exists yet.
+    if (saved?.exists && Array.isArray(saved.timeline?.tracks)) {
+      mockTracks.value = saved.timeline.tracks as Track[];
+      editTimelineVersion.value = Number(saved.version) || 0;
+      editTimelineSaved.value = true;
+    } else {
+      mockTracks.value = createTimelineTracks(videoGroups);
+      editTimelineVersion.value = 0;
+      editTimelineSaved.value = false;
+      const hasInitialClips = mockTracks.value.some((track) => track.clips.length > 0);
+      if (!hasInitialClips) return;
+      try {
+        const initialSave: any = await axios.post("/production/workbench/saveEditTimeline", {
+          projectId,
+          scriptId,
+          expectedVersion: 0,
+          idempotencyKey: createIdempotencyKey("edit-timeline-initial"),
+          timeline: { tracks: mockTracks.value },
+        });
+        const savedInitial = initialSave?.data ?? initialSave;
+        editTimelineVersion.value = Number(savedInitial.version) || 0;
+        editTimelineSaved.value = true;
+      } catch (error) {
+        console.error("Failed to persist initial edit timeline:", error);
+      }
+    }
+  } catch (error) {
+    console.error("Failed to load edit timeline:", error);
+  }
 }
 
 function createDemoTracks(): Track[] {
@@ -204,7 +231,54 @@ function createDemoTracks(): Track[] {
   ];
 }
 
-const mockTracks = createDemoTracks();
+const mockTracks = ref<Track[]>(createDemoTracks());
+const editTimelineVersion = ref(0);
+const editTimelineSaved = ref(false);
+let footageLoadSequence = 0;
+
+function createTimelineTracks(videoGroups: any[]): Track[] {
+  const tracks = createDemoTracks();
+  const mainTrack = tracks.find((track) => track.type === "video" && track.isMain);
+  if (!mainTrack) return tracks;
+  let cursor = 0;
+  for (const [groupIndex, group] of videoGroups.entries()) {
+    const videos = Array.isArray(group?.video) ? group.video : [];
+    const selected = videos.find((video: any) => Number(video.id) === Number(group.videoId)) ?? videos[0];
+    if (!selected?.filePath) continue;
+    const plannedDuration = Number(group.plannedDuration ?? selected.plannedDuration ?? group.duration);
+    if (!Number.isFinite(plannedDuration) || plannedDuration <= 0) continue;
+    const sourceDuration = Number(selected.sourceDuration) > 0 ? Number(selected.sourceDuration) : 0;
+    const clipDuration = plannedDuration;
+    mainTrack.clips.push({
+      id: `storyboard-video-${group.trackId ?? group.id ?? groupIndex}`,
+      trackId: mainTrack.id,
+      type: "video",
+      name: `#${groupIndex + 1}`,
+      startTime: cursor,
+      endTime: cursor + clipDuration,
+      sourceUrl: selected.filePath,
+      originalDuration: sourceDuration || plannedDuration,
+      sourceDuration,
+      plannedDuration,
+      sourceShortfall: sourceDuration > 0 && sourceDuration < plannedDuration,
+      trimStart: 0,
+      trimEnd: clipDuration,
+      playbackRate: 1,
+      volume: 1,
+      thumbnails: [],
+      selected: false,
+      sourceRef: selected.sourceRef ?? {
+        projectId: Number(project.value?.id),
+        scriptId: Number(episodesId.value),
+        trackId: Number(group.trackId ?? group.id),
+        videoId: Number(selected.id),
+        version: Number(group.trackVersion ?? group.version ?? 0),
+      },
+    } as any);
+    cursor += clipDuration;
+  }
+  return tracks;
+}
 
 //导入到剪辑台
 function handleBatchDownload(value: ImportVideoItem[]) {}

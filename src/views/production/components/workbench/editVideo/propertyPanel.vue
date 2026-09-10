@@ -59,6 +59,9 @@
               <span class="durationLabel">{{ $t("workbench.production.editVideo.totalDuration") }}</span>
               <t-tag size="small" theme="default" variant="outline">{{ (selectedClip.endTime - selectedClip.startTime).toFixed(2) }}s</t-tag>
             </div>
+            <div v-if="selectedClip.type === 'video' || selectedClip.type === 'audio'" class="mediaDurationHint">
+              素材 {{ sourceMediaDuration.toFixed(2) }}s · 时间线片段 {{ timelineClipDuration.toFixed(2) }}s
+            </div>
           </div>
         </div>
 
@@ -259,6 +262,15 @@ const transitionDuration = ref(1);
 // 字幕属性
 const subtitleText = ref("");
 const subtitleFontSize = ref(24);
+
+const sourceMediaDuration = computed(() => {
+  const clip = selectedClip.value as any;
+  return Number(clip?.sourceDuration ?? clip?.originalDuration ?? 0) || 0;
+});
+const timelineClipDuration = computed(() => {
+  const clip = selectedClip.value;
+  return clip ? Math.max(0, clip.endTime - clip.startTime) : 0;
+});
 
 // 监听选中 Clip 变化，更新属性值
 watch(
@@ -545,6 +557,13 @@ function handleDuplicateClip() {
           font-size: 12px;
           color: var(--td-text-color-placeholder);
         }
+      }
+
+      .mediaDurationHint {
+        color: var(--td-text-color-secondary);
+        font-size: 11px;
+        line-height: 1.5;
+        margin-top: 4px;
       }
 
       .actions {

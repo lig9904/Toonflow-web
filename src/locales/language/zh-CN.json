@@ -1832,5 +1832,12 @@
   "workbench.cornerScape.textPromptInput": "提示词附加指令",
   "workbench.cornerScape.textPromptPh": "请输入提示词附加指令（可选）",
   "settings.vendor.testModel": "测试",
-  "storyboard.assets.addStoryboardFailed": "分镜添加失败"
+  "storyboard.assets.addStoryboardFailed": "分镜添加失败",
+  "builtinAgent": {
+    "mediaBudgetLabel": "本次生成数量上限：",
+    "imageLabel": "图片",
+    "videoLabel": "视频",
+    "zeroUnlimitedHint": "0 表示不限制",
+    "unlimitedLabel": "不限"
+  }
 }

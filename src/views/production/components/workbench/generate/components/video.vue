@@ -121,6 +121,8 @@ async function selectVideo(v: HistoryVideoItem) {
       expectedVersion: currentTrack.value.version,
       idempotencyKey: trackMutationKey("video-select", v.id),
     });
+    selectVideoId.value = v.id;
+    currentTrack.value.selectVideoId = v.id;
     window.$message.success($t("workbench.generate.selectVideoSuccess"));
     emit("refresh");
   } catch (error: any) {
@@ -247,8 +249,15 @@ function handlePlayerClose() {
 
 /** 点击历史视频条目进行预览 */
 function previewVideo(v: HistoryVideoItem) {
-  if (v.state === "生成中" || v.state === "生成失败") return;
+  if (v.state === "生成中" || v.state === "生成失败" || !v.src) return;
+  openVideoPlayer(v);
 }
+
+watch(
+  () => currentTrack.value?.selectVideoId,
+  (id) => { selectVideoId.value = id ?? undefined; },
+  { immediate: true },
+);
 </script>
 
 <style lang="scss" scoped>

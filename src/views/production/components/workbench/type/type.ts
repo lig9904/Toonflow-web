@@ -20,6 +20,7 @@ interface VideoModel {
   mode: VideoMode[];
   associationSkills?: string;
   audio: "optional" | false | true;
+  referenceRatio?: "adaptive";
   durationResolutionMap: { duration: number[]; resolution: string[] }[];
 }
 interface UploadItemAssets extends UploadItemBase {
@@ -48,6 +49,7 @@ interface TrackItem {
   id: number;
   version?: number;
   prompt: string;
+  promptJobId?: string | null;
   state: "未生成" | "生成中" | "已完成" | "生成失败";
   reason?: string;
   selectVideoId?: number | null;

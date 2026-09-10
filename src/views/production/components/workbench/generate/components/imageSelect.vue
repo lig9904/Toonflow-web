@@ -190,7 +190,7 @@ function getFileTypeByExt(src: string | undefined): "image" | "video" | "audio" 
 }
 /** 根据混合模式推导当前允许的 clip 媒体类型 */
 const mixedClipMediaTypes = computed<ClipMediaType[]>(() => {
-  const mode = props.mode;
+  const mode = parseMode(String(props.mode));
   if (!Array.isArray(mode)) return [];
   const map: Record<string, ClipMediaType> = { audioReference: "audio", imageReference: "image", videoReference: "video" };
   return mode.filter((m) => m in map).map((m) => map[m]);

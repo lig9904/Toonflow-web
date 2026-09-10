@@ -12,10 +12,25 @@ export async function loadVideoClipThumbnails(tracksStore: any, clipId: string, 
     const clip = tracksStore.getClip(clipId) as MediaClip;
     if (clip && clip.type === "video") {
       clip.thumbnails = result.thumbnails;
-      if (result.duration > 0 && clip.endTime - clip.startTime <= 0) {
-        clip.endTime = clip.startTime + result.duration;
+      if (result.duration > 0) {
+        // Keep the probed source duration separate from the planned timeline
+        // interval. Updating endTime here would turn a planned 2/3/4 second
+        // shot into the generated source duration (usually 4 seconds).
+        (clip as any).sourceDuration = result.duration;
         clip.originalDuration = result.duration;
-        clip.trimEnd = result.duration;
+
+        // Only fill an unset/invalid trim window. An explicit trim must stay
+        // intact after the asynchronous probe completes.
+        const trimEnd = Number(clip.trimEnd);
+        if (!Number.isFinite(trimEnd) || trimEnd <= 0) {
+          clip.trimEnd = result.duration;
+        } else if (trimEnd > result.duration) {
+          clip.trimEnd = result.duration;
+        }
+
+        if (clip.endTime - clip.startTime <= 0) {
+          clip.endTime = clip.startTime + result.duration;
+        }
       }
     }
   } catch (error) {
@@ -36,6 +51,7 @@ export async function loadAudioClipWaveform(tracksStore: any, clipId: string, so
       clip.waveformData = result.waveformData;
 
       if (result.duration > 0) {
+        (clip as any).sourceDuration = result.duration;
         clip.originalDuration = result.duration;
         const clipDuration = clip.endTime - clip.startTime;
         if (clipDuration <= 0) {
