@@ -48,9 +48,9 @@
         :canvas-height="canvasHeight"
         ref="editVideoRef" />
     </div>
-    <div v-if="importLoading" class="importLoadingMask">
+    <div v-if="importLoading || preparingEditor" class="importLoadingMask">
       <div class="importLoadingContent">
-        <t-loading size="large" :text="$t('workbench.production.wb.importingLoading')" />
+        <t-loading size="large" :text="preparingEditor ? '正在加载剪辑素材和已保存的时间线' : $t('workbench.production.wb.importingLoading')" />
       </div>
     </div>
   </t-dialog>
@@ -129,23 +129,42 @@ function getMediaType(src?: string): MediaType {
   return "unknown";
 }
 //切换菜单
-function changeMenu(type: string) {
-  activeMenu.value = type;
-  if (type == "editVideo") editFootage();
+const preparingEditor = ref(false);
+let menuRequestSequence = 0;
+async function changeMenu(type: string) {
+  if (activeMenu.value === type) return;
+  const request = ++menuRequestSequence;
+  if (type !== "editVideo") {
+    ++footageLoadSequence;
+    preparingEditor.value = false;
+    activeMenu.value = type;
+    return;
+  }
+  preparingEditor.value = true;
+  try {
+    // The editor hydrates its store on mount. Mount only after the persisted
+    // draft and media have loaded so a late response cannot leave it empty.
+    const ready = await editFootage();
+    if (request !== menuRequestSequence) return;
+    if (ready) activeMenu.value = type;
+    else window.$message.error("剪辑数据加载失败，请重试");
+  } finally {
+    if (request === menuRequestSequence) preparingEditor.value = false;
+  }
 }
 const episodesId = inject<Ref<number>>("episodesId")!;
 //查询剪辑素材
-async function editFootage() {
+async function editFootage(): Promise<boolean> {
   const sequence = ++footageLoadSequence;
   const projectId = Number(project.value?.id);
   const scriptId = Number(episodesId.value ?? 0);
-  if (!Number.isSafeInteger(projectId) || projectId <= 0 || !Number.isSafeInteger(scriptId) || scriptId <= 0) return;
+  if (!Number.isSafeInteger(projectId) || projectId <= 0 || !Number.isSafeInteger(scriptId) || scriptId <= 0) return false;
   try {
     const [materialResponse, timelineResponse] = await Promise.all([
       axios.post("/assets/getMaterialData", { projectId, scriptId }),
       axios.post("/production/workbench/getEditTimeline", { projectId, scriptId }),
     ]);
-    if (sequence !== footageLoadSequence) return;
+    if (sequence !== footageLoadSequence) return false;
     const data = (materialResponse as any).data ?? materialResponse;
     const saved = (timelineResponse as any).data ?? timelineResponse;
     const materialRows = Array.isArray(data?.data) ? data.data : [];
@@ -191,7 +210,7 @@ async function editFootage() {
       editTimelineVersion.value = 0;
       editTimelineSaved.value = false;
       const hasInitialClips = mockTracks.value.some((track) => track.clips.length > 0);
-      if (!hasInitialClips) return;
+      if (!hasInitialClips) return true;
       try {
         const initialSave: any = await axios.post("/production/workbench/saveEditTimeline", {
           projectId,
@@ -207,8 +226,10 @@ async function editFootage() {
         console.error("Failed to persist initial edit timeline:", error);
       }
     }
+    return true;
   } catch (error) {
     console.error("Failed to load edit timeline:", error);
+    return false;
   }
 }
 
