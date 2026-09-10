@@ -25,14 +25,14 @@
         :class="{ active: run.id === selectedRun?.id }"
         @click="selectRun(run.id)">
         <span class="runPrompt">{{ run.prompt }}</span>
-        <t-tag size="small" :theme="statusTheme(run.status)" variant="light">{{ statusLabel(run.status) }}</t-tag>
+        <t-tag size="small" :theme="statusTheme(run.status, run)" variant="light">{{ statusLabel(run.status, run) }}</t-tag>
       </button>
     </div>
     <t-empty v-else description="当前范围还没有内置 Agent 运行" />
 
     <div v-if="selectedRun" class="runDetails">
       <div class="runMeta">
-        <t-tag size="small" :theme="statusTheme(selectedRun.status)" variant="light">{{ statusLabel(selectedRun.status) }}</t-tag>
+        <t-tag size="small" :theme="statusTheme(selectedRun.status, selectedRun)" variant="light">{{ statusLabel(selectedRun.status, selectedRun) }}</t-tag>
         <span>{{ progressText }}</span>
       </div>
       <div class="usageRow">
@@ -41,7 +41,7 @@
         <span>执行者：{{ executionUserLabel }}</span>
       </div>
       <div v-if="builtinUsesIndependentOutput(selectedRun)" class="muted">各步骤独立调用模型 · 文本累计 {{ selectedRun.outputTokens ?? 0 }} tokens</div>
-      <div v-if="selectedRun.status === 'waiting_human'" class="humanTask">
+      <div v-if="agentType !== 'productionAgent' && selectedRun.status === 'waiting_human'" class="humanTask">
         <div class="humanQuestion">{{ waitingQuestion || "运行正在等待你的处理" }}</div>
         <div class="answerRow">
           <t-input v-model="answer" clearable placeholder="输入处理结果后继续运行" @enter="submitAnswer" />
@@ -49,10 +49,11 @@
         </div>
       </div>
       <div v-if="selectedRun.errorMessage" class="runError">{{ selectedRun.errorMessage }}</div>
+      <div v-for="(issue, index) in runIssues" :key="index" class="muted">{{ issue }}</div>
       <div class="runControls">
         <t-button v-if="selectedRun.status === 'running' || selectedRun.status === 'queued'" size="small" variant="outline" @click="control('pause')">暂停</t-button>
         <t-button v-if="selectedRun.status === 'paused'" size="small" theme="primary" @click="control('resume')">继续</t-button>
-        <t-button v-if="selectedRun.status === 'running' || selectedRun.status === 'paused' || selectedRun.status === 'waiting_human'" size="small" variant="outline" @click="control('takeover')">我来接手</t-button>
+        <t-button v-if="agentType !== 'productionAgent' && (selectedRun.status === 'running' || selectedRun.status === 'paused' || selectedRun.status === 'waiting_human')" size="small" variant="outline" @click="control('takeover')">我来接手</t-button>
         <t-button v-if="!terminal" size="small" theme="danger" variant="text" @click="control('cancel')">取消运行</t-button>
       </div>
     </div>
@@ -73,6 +74,7 @@ import {
   type BuiltinControlAction,
   type BuiltinRunScope,
   type BuiltinRunStatus,
+  type BuiltinRunView,
   type BuiltinThinkLevel,
 } from "@/types/builtinAgent";
 
@@ -129,9 +131,16 @@ const executionUserLabel = computed(() => {
 const loading = computed(() => Boolean(store.loading[scopeKey.value]));
 const error = computed(() => store.errors[scopeKey.value]);
 const terminal = computed(() => Boolean(selectedRun.value && isBuiltinRunTerminal(selectedRun.value.status)));
+const runIssues = computed(() => {
+  const result = selectedRun.value?.result as { issues?: Array<{ message?: string }> } | null;
+  return Array.isArray(result?.issues) ? result.issues.map((issue) => issue.message).filter(Boolean).slice(0, 20) : [];
+});
 const showComposer = computed(() => props.showComposer !== false);
 
-function statusLabel(status: BuiltinRunStatus): string {
+function statusLabel(status: BuiltinRunStatus, run?: BuiltinRunView): string {
+  const outcome = (run?.result as { outcome?: string } | null)?.outcome;
+  if (outcome === "not_executed") return "未执行";
+  if (status === "succeeded" && outcome === "partial") return "已结束（部分未完成）";
   return {
     queued: "待执行",
     running: "进行中",
@@ -144,7 +153,8 @@ function statusLabel(status: BuiltinRunStatus): string {
   }[status];
 }
 
-function statusTheme(status: BuiltinRunStatus): "default" | "primary" | "success" | "warning" | "danger" {
+function statusTheme(status: BuiltinRunStatus, run?: BuiltinRunView): "default" | "primary" | "success" | "warning" | "danger" {
+  if ((run?.result as { outcome?: string } | null)?.outcome === "partial") return "warning";
   if (status === "succeeded") return "success";
   if (status === "failed" || status === "reconciliation_required" || status === "cancelled") return "danger";
   if (status === "waiting_human" || status === "paused") return "warning";

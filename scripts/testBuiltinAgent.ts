@@ -5,6 +5,8 @@ import {
   builtinHumanQuestion,
   builtinUsesIndependentOutput,
   builtinProductionPreview,
+  builtinArtifactView,
+  builtinImageUrl,
   builtinRunMessages,
   builtinScopeKey,
   dedupeBuiltinRunEvents,
@@ -44,6 +46,12 @@ const run = {
 };
 
 const first = [event(1, "a"), event(2, "b")];
+const generatedArtifact = builtinArtifactView({ kind: "image", targetKind: "asset", targetId: 16, jobId: 72, selected: false, path: "/7/assets/new.jpg" });
+assert.equal(generatedArtifact.jobId, 72); assert.equal(generatedArtifact.targetId, 16);
+assert.equal(generatedArtifact.actionLabel, "查看生成图");
+assert.equal(builtinImageUrl(generatedArtifact, "/api", "https://app.test:6443/#/production"), "https://app.test:6443/oss/7/assets/new.jpg");
+assert.equal(builtinImageUrl({ ...generatedArtifact, path: "/7/../private.jpg" }, "/api", "https://app.test/"), undefined);
+assert.equal(builtinImageUrl({ ...generatedArtifact, path: "https://other.test/image.jpg" }, "/api", "https://app.test/"), undefined);
 const videoModel = { durationResolutionMap: [{ duration: [3, 5], resolution: ["720p", "1080p"] }, { duration: [10], resolution: ["720p"] }] };
 assert.deepEqual(videoDurations(videoModel), [3, 5, 10]);
 assert.deepEqual(videoResolutions(videoModel, 10), ["720p"]);
@@ -84,7 +92,7 @@ assert.deepEqual(mapped.map((message) => message.text), [
   "创建测试剧本",
   "完整回复",
   "第二条回复",
-  "分镜图片已生成。待选择，尚未应用到当前内容",
+  "分镜图片已生成。图片已保存，未覆盖当前画布内容",
 ]);
 assert.equal(mapped[0].role, "user", "run prompt is restored as the user message");
 assert.equal(mapped.at(-1)?.artifact?.selected, false, "late unselected output stays explicitly pending selection");

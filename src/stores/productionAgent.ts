@@ -729,6 +729,7 @@ function makeProductionAgentStore(projectId: string) {
       flowSaveError,
       setFlowData,
       getFlowData,
+      refreshCanvas: refreshStoryboardWorkflow,
       refreshStoryboard,
       setStoryboardEditing,
       episodesId,

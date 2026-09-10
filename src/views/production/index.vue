@@ -40,7 +40,7 @@
       <storyboardTable :id="props.id" v-model="flowData.storyboardTable" :preview="builtinRuns.canvasPreview(builtinScope, 'storyboardTable')" :handleIds="props.data.handleIds" />
     </template>
     <template #node-assets="props">
-      <assets :id="props.id" v-model="flowData.assets" :handleIds="props.data.handleIds" />
+      <assets :id="props.id" v-model="flowData.assets" :highlight-id="focusedAssetId" :handleIds="props.data.handleIds" />
     </template>
     <template #node-storyboard="props">
       <storyboard :id="props.id" v-model="flowData.storyboard" :assetsData="flowData.assets" :handleIds="props.data.handleIds" />
@@ -96,6 +96,7 @@
     </div>
     <t-guide v-model="current" :steps="steps" @finish="() => (current = -1)" />
     <t-tag variant="outline" class="fps" v-if="!openShowVisible">{{ fps }}</t-tag>
+    <t-image-viewer v-if="artifactPreviewVisible" v-model:visible="artifactPreviewVisible" :images="artifactPreviewImages" />
   </VueFlow>
 </template>
 
@@ -116,7 +117,7 @@ import storyboard from "./node/storyboard.vue";
 import workbench from "./node/workbench.vue";
 import poster from "./node/poster.vue";
 import rightChatBox from "./components/rightChatBox/index.vue";
-import type { BuiltinArtifactTarget } from "@/types/builtinAgent";
+import { builtinImageUrl, type BuiltinArtifactTarget, type BuiltinArtifactView } from "@/types/builtinAgent";
 import { useLayout } from "./utils/dagre";
 import { useFlowBuilder } from "./utils/flowBuilder";
 import axios from "@/utils/axios";
@@ -129,6 +130,9 @@ const { project } = storeToRefs(projectStore());
 import settingStore from "@/stores/setting";
 const { canvasWheelEvent, otherSetting } = storeToRefs(settingStore());
 const openShowVisible = ref(true);
+const focusedAssetId = ref<number>();
+const artifactPreviewVisible = ref(false);
+const artifactPreviewImages = ref<string[]>([]);
 const router = useRouter();
 const route = useRoute();
 const {
@@ -321,20 +325,24 @@ async function getScriptData() {
   }
 }
 
-async function openBuiltinArtifact(target: BuiltinArtifactTarget) {
+async function openBuiltinArtifact(value: BuiltinArtifactTarget | BuiltinArtifactView) {
+  const artifact = typeof value === "string" ? undefined : value;
+  const target = typeof value === "string" ? value : value.target;
+  const imageUrl = artifact && builtinImageUrl(artifact, settingStore().baseUrl, window.location.href);
+  if (imageUrl) { artifactPreviewImages.value = [imageUrl]; artifactPreviewVisible.value = true; }
   if (target === "novel") {
     await router.push("/novel");
     return;
   }
   if (target === "assets") {
-    await router.push("/assets");
-    return;
+    focusedAssetId.value = artifact?.targetId;
+    await productionAgentStore().refreshCanvas();
   }
   if (target === "script") {
     await router.push({ path: "/scriptAgent", query: { tab: "script" } });
     return;
   }
-  const nodeId = target === "planning" ? "scriptPlan" : target === "videos" ? "workbench" : "storyboard";
+  const nodeId = target === "assets" ? "assets" : target === "planning" ? "scriptPlan" : target === "videos" ? "workbench" : "storyboard";
   openShowVisible.value = false;
   await nextTick();
   if (findNode(nodeId)) fitView({ nodes: [nodeId], duration: 300, padding: 0.15 });

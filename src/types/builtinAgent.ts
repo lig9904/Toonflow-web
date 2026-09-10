@@ -110,6 +110,20 @@ export interface BuiltinArtifactView {
   detail: string;
   actionLabel: string;
   selected?: boolean;
+  kind?: string;
+  jobId?: number;
+  targetId?: number;
+  path?: string;
+}
+
+export function builtinImageUrl(artifact: BuiltinArtifactView, apiBase: string, pageUrl: string): string | undefined {
+  const path = artifact.path;
+  if (artifact.kind !== "image" || typeof path !== "string" || !/^\/[1-9]\d*\//.test(path) || /[\\\u0000-\u001f?#]/.test(path) || path.split("/").some((part) => part === "." || part === "..")) return undefined;
+  try {
+    const base = new URL(apiBase || "/api", pageUrl);
+    if (!["http:", "https:"].includes(base.protocol)) return undefined;
+    return base.origin + "/oss" + path.split("/").map(encodeURIComponent).join("/");
+  } catch { return undefined; }
 }
 
 export interface BuiltinRunListResponse {
@@ -232,9 +246,11 @@ export function builtinArtifactView(data: unknown): BuiltinArtifactView {
     return {
       target: record.targetKind === "asset" ? "assets" : "images",
       title: `${target}图片已生成`,
-      detail: selected ? "已应用到当前内容" : "待选择，尚未应用到当前内容",
-      actionLabel: record.targetKind === "asset" ? "查看素材" : "查看分镜",
+      detail: selected ? "已显示在画布" : "图片已保存，未覆盖当前画布内容",
+      actionLabel: "查看生成图",
       selected,
+      kind: "image", path: typeof record.path === "string" ? record.path : undefined,
+      jobId: positiveIds([record.jobId])[0], targetId: positiveIds([record.targetId])[0],
     };
   }
   if (kind === "video") {

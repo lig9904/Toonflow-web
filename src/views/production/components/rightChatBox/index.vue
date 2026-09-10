@@ -33,8 +33,7 @@
             <div class="builtinArtifactCard">
               <strong>{{ getBuiltinArtifact(message)?.title }}</strong>
               <span>{{ getBuiltinArtifact(message)?.detail }}</span>
-              <t-tag v-if="getBuiltinArtifact(message)?.selected === false" size="small" theme="warning" variant="light">待选择</t-tag>
-              <t-button size="small" variant="outline" @click="openBuiltinArtifact(getBuiltinArtifact(message)!.target)">
+              <t-button size="small" variant="outline" @click="openBuiltinArtifact(getBuiltinArtifact(message)!)">
                 {{ getBuiltinArtifact(message)?.actionLabel }}
               </t-button>
             </div>
@@ -171,10 +170,10 @@ const props = defineProps({ title: String });
 
 const emit = defineEmits<{
   close: [];
-  navigateArtifact: [target: BuiltinArtifactTarget];
+  navigateArtifact: [artifact: BuiltinArtifactView];
 }>();
 
-function openBuiltinArtifact(target: BuiltinArtifactTarget) {
+function openBuiltinArtifact(artifact: BuiltinArtifactView) {
   const runProjectId = selectedBuiltinRun.value?.projectId;
   if (runProjectId != null && Number(project.value?.id) !== runProjectId) {
     const runProject = projectStore().allProject.find((item) => Number(item.id) === runProjectId);
@@ -184,7 +183,7 @@ function openBuiltinArtifact(target: BuiltinArtifactTarget) {
     }
     projectStore().project = runProject;
   }
-  emit("navigateArtifact", target);
+  emit("navigateArtifact", artifact);
 }
 
 const inputValue = ref("");

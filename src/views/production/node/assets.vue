@@ -34,7 +34,7 @@
             <i-right size="32"></i-right>
           </div>
           <div class="deriveAssets">
-            <t-card v-for="(item, index) in asset.derive" :key="index" class="assetCard" @click="generateAssetsImage(item, asset.src)">
+            <t-card v-for="(item, index) in asset.derive" :key="index" class="assetCard" :data-asset-id="item.id" :class="{ artifactHighlighted: highlightId === item.id }" @click="generateAssetsImage(item, asset.src)">
               <div v-if="item.src && item.state == '已完成'" class="assetImageWrap">
                 <t-image :src="item.src" fit="contain" class="assetImage" :preview="true">
                   <template #overlayContent>
@@ -88,6 +88,7 @@ import useProjectStore from "@/stores/project";
 const { project } = storeToRefs(useProjectStore());
 const props = defineProps<{
   id: string;
+  highlightId?: number;
   handleIds: {
     target: string;
   };
@@ -178,6 +179,7 @@ async function removeFn(id: number) {
 </script>
 
 <style lang="scss" scoped>
+.artifactHighlighted { outline: 3px solid var(--td-brand-color); outline-offset: 3px; }
 .assets {
   width: fit-content;
   user-select: text;
