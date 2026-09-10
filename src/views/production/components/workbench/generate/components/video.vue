@@ -58,6 +58,7 @@
           <div v-if="v.state === '已完成' || v.state === '生成成功'" class="playBtn" @click.stop="openVideoPlayer(v)">
             <i-play size="16" />
           </div>
+          <button v-if="v.downloadRetryable && v.jobId" type="button" class="retryBtn" title="继续下载原视频，不重新生成" :disabled="retryingJobs.has(v.jobId)" @click.stop="retryVideoDownload(v)">{{ retryingJobs.has(v.jobId) ? "正在下载…" : "重试下载" }}</button>
         </div>
       </div>
     </div>
@@ -159,6 +160,26 @@ function handleDeleteVideo(value: HistoryVideoItem) {
 
 /** 单个视频下载 */
 const downloadingSet = new Set<string>();
+const retryingJobs = ref(new Set<number>());
+
+async function retryVideoDownload(value: HistoryVideoItem) {
+  if (!value.jobId || !value.downloadRetryable || retryingJobs.value.has(value.jobId)) return;
+  retryingJobs.value.add(value.jobId);
+  try {
+    const { data } = await axios.post("/production/workbench/retryVideoDownload", {
+      projectId: Number(project.value?.id), scriptId: episodesId.value ?? 0, trackId: currentTrack.value.id, jobId: value.jobId,
+    });
+    if (data.status === "SUCCEEDED") window.$message.success("原视频已下载并保存");
+    else if (data.status === "RECONCILIATION_REQUIRED") window.$message.error("暂时无法取回原视频，稍后可继续重试下载");
+    else window.$message.info("正在继续下载原视频，无需重新生成");
+    emit("refresh");
+  } catch (error: any) {
+    window.$message.error(error?.message || error?.response?.data?.message || "重试下载失败");
+    if ((error?.status ?? error?.response?.status) === 409) emit("refresh");
+  } finally {
+    retryingJobs.value.delete(value.jobId);
+  }
+}
 
 async function downloadVideo(value: HistoryVideoItem) {
   if (!value?.src) return;
@@ -322,7 +343,8 @@ watch(
       .selectBtn,
       .delBtn,
       .download,
-      .playBtn {
+      .playBtn,
+      .retryBtn {
         position: absolute;
         display: none;
         align-items: center;
@@ -355,11 +377,23 @@ watch(
         border-radius: 50%;
         background: rgba(0, 0, 0, 0.55);
       }
+      .retryBtn {
+        top: 4px;
+        left: 4px;
+        display: flex;
+        width: auto;
+        padding: 0 6px;
+        border: 0;
+        border-radius: 4px;
+        font-size: 12px;
+        line-height: 20px;
+      }
       &:hover {
         .selectBtn,
         .delBtn,
         .download,
-        .playBtn {
+        .playBtn,
+        .retryBtn {
           display: flex;
         }
       }

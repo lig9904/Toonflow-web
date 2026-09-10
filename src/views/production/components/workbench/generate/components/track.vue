@@ -31,7 +31,7 @@
             @change="(val: boolean) => toggleCheck(track.id, val)" />
           <t-tag class="indexTag" size="small">#{{ index + 1 }}</t-tag>
           <t-tag class="selectTag" theme="success" size="small" v-if="track.selectVideoId">已选择</t-tag>
-          <t-tag class="promptStateTag" size="small" :theme="promptStateTheme(track)">{{ promptStateLabel(track) }}</t-tag>
+          <t-tag class="promptStateTag" size="small" :theme="promptStateTheme(track)">提示词：{{ promptStateLabel(track) }}</t-tag>
           <t-tooltip v-if="track.state === '生成失败' && track.reason" :content="track.reason">
             <span class="promptFailureMark">!</span>
           </t-tooltip>
@@ -599,8 +599,9 @@ watch(
       .promptStateTag {
         position: absolute;
         top: 4px;
-        left: 4px;
+        left: 28px;
         z-index: 2;
+        pointer-events: none;
       }
       .promptFailureMark {
         position: absolute;

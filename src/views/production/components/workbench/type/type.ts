@@ -60,6 +60,8 @@ interface TrackItem {
 
 interface VideoItem {
   id: number;
+  jobId?: number;
+  downloadRetryable?: boolean;
   src: string;
   state: "未生成" | "生成中" | "已完成" | "生成成功" | "生成失败" | "需人工核对";
   errorReason?: string | null;
@@ -99,6 +101,8 @@ interface HistoryVideoItem {
   time?: number | null;
   videoTrackId?: number | null;
   version?: number;
+  jobId?: number;
+  downloadRetryable?: boolean;
 }
 interface ModelSetting {
   mode: string;

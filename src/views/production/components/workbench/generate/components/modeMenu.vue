@@ -24,7 +24,7 @@
       <div class="status">
         <t-popup
           trigger="click"
-          placement="top"
+          placement="bottom-left"
           overlay-class-name="resDurPickerPopup"
           :overlay-inner-style="{ padding: '16px', borderRadius: '8px' }">
           <t-tag class="btn" variant="outline" :title="durationNotice || undefined">
@@ -176,6 +176,8 @@ async function updateDuration(newDuration: number) {
 <style lang="scss">
 .resolutionDurationPicker {
   min-width: 240px;
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
   .durationContext {
     margin-bottom: 10px;
     color: var(--td-text-color-secondary);

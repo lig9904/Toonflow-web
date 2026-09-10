@@ -606,8 +606,9 @@ const hasGenerateVideoIds = computed(() => {
     .flatMap((i) => i);
 });
 const hasGeneratePromptIds = computed(() => {
-      const trackIds = trackList.value.filter((t) => t.state == "生成中").map((t) => t.id);
-  return trackIds;
+  // Poll every loaded track so a prompt job started by another session is
+  // reflected here even when this tab never observed its queued state.
+  return trackList.value.map((track) => track.id);
 });
 /** 查询所有视频列表，并检测生成完成/失败状态 */
 async function getVideoList() {
@@ -632,7 +633,7 @@ async function getVideoList() {
 }
 function startPromptPoll() {
   if (promptPollTimer !== null) return;
-  promptPollTimer = setInterval(() => getTrackPromptList(), 3000);
+  promptPollTimer = setInterval(() => { void getTrackPromptList().catch(() => undefined); }, 3000);
 }
 
 function stopPromptPoll() {
@@ -642,34 +643,64 @@ function stopPromptPoll() {
   }
 }
 /** 查询所有视频列表，并检测生成完成/失败状态 */
+let promptPollInFlight = false;
 async function getTrackPromptList() {
-  const { data } = await axios.post("/production/workbench/checkVideoPrompt", {
-    projectId: project.value?.id,
-    scriptId: episodesId.value ?? 0,
-    trackIds: hasGeneratePromptIds.value,
-    jobIds: trackList.value.filter((track) => track.state === "生成中" && track.promptJobId).map((track) => track.promptJobId),
-  });
-  if (data && data.length) {
-    data.forEach((item: { id: number; jobId?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number }) => {
-      const findData = trackList.value.find((t) => t.id == item.id);
-      if (findData) {
-        const localDraft = findData.prompt !== (persistedTrackPrompts.get(findData.id) ?? "");
-        if (item.jobId) findData.promptJobId = item.jobId;
-        findData.state = item.state;
-        if ((item.state === "已完成" || item.state === "生成中") && !localDraft) findData.prompt = item?.prompt ?? "";
-        if (item.prompt != null && (item.state === "已完成" || item.state === "生成失败")) persistedTrackPrompts.set(findData.id, item.prompt);
-        if (Number.isSafeInteger(item.version) && Number(item.version) >= 0) findData.version = Number(item.version);
-        findData.reason = item?.reason ?? "";
-        if (item.state === "已完成" || item.state === "生成失败") {
-          const intent = promptGenerationIntents.get(findData.id);
-          if (intent) promptGenerationIntents.delete(findData.id);
-        }
-        if (item.state === "生成失败") {
-          window.$message.error(`提示词生成失败，${item.reason ?? "未知原因"}`);
-        }
-      }
+  if (promptPollInFlight || !hasGeneratePromptIds.value.length) return;
+  const requestedIds = new Set(hasGeneratePromptIds.value);
+  promptPollInFlight = true;
+  try {
+    const { data } = await axios.post("/production/workbench/checkVideoPrompt", {
+      projectId: project.value?.id,
+      scriptId: episodesId.value ?? 0,
+      trackIds: [...requestedIds],
+      jobIds: trackList.value.filter((track) => track.state === "生成中" && track.promptJobId).map((track) => track.promptJobId),
     });
-  }
+    if (Array.isArray(data)) {
+      const returnedIds = new Set<number>();
+      data.forEach((item: { id: number; jobId?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number }) => {
+        const findData = trackList.value.find((t) => t.id == item.id);
+        returnedIds.add(Number(item.id));
+        if (findData) {
+          const remoteVersion = Number(item.version);
+          const localVersion = Number(findData.version ?? 0);
+          // A save may have completed while this read was in flight.
+          if (Number.isSafeInteger(remoteVersion) && remoteVersion < localVersion) return;
+          const previousState = findData.state;
+          const previousJobId = findData.promptJobId;
+          const localDraft = findData.prompt !== (persistedTrackPrompts.get(findData.id) ?? "");
+          if (item.jobId) findData.promptJobId = item.jobId;
+          if (findData.state !== item.state) findData.state = item.state;
+          if ((item.state === "已完成" || item.state === "生成中") && !localDraft && item.prompt !== findData.prompt) findData.prompt = item?.prompt ?? "";
+          const remoteVersionChanged = Number.isSafeInteger(remoteVersion) && remoteVersion >= 0 && findData.version !== remoteVersion;
+          if (item.prompt != null && (item.state === "已完成" || item.state === "生成失败") && !localDraft) persistedTrackPrompts.set(findData.id, item.prompt);
+          if (remoteVersionChanged && localDraft) {
+            // Keep the local draft anchored to its original version. Advancing it
+            // would let the next blur overwrite a newer remote edit.
+            promptConflictVersions.set(findData.id, localVersion);
+          } else if (remoteVersionChanged) findData.version = remoteVersion;
+          if (findData.reason !== (item?.reason ?? "")) findData.reason = item?.reason ?? "";
+          if (item.state === "已完成" || item.state === "生成失败") {
+            const intent = promptGenerationIntents.get(findData.id);
+            if (intent) promptGenerationIntents.delete(findData.id);
+          }
+          if (item.state === "生成失败" && (previousState !== "生成失败" || previousJobId !== item.jobId) && (item.jobId || previousState === "生成中")) {
+            window.$message.error(`提示词生成失败，${item.reason ?? "未知原因"}`);
+          }
+        }
+      });
+      const deletedIds = [...requestedIds].filter((id) => !returnedIds.has(Number(id)));
+      if (deletedIds.length) {
+        const deleted = new Set(deletedIds.map(Number));
+        trackList.value = trackList.value.filter((track) => !deleted.has(Number(track.id)));
+        deletedIds.forEach((id) => {
+          persistedTrackPrompts.delete(id);
+          promptMutationIntents.delete(id);
+          promptGenerationIntents.delete(id);
+        });
+        if (activeTrackIndex.value >= trackList.value.length) activeTrackIndex.value = Math.max(0, trackList.value.length - 1);
+      }
+    }
+  } finally { promptPollInFlight = false; }
 }
 watch(
   () => hasGenerateVideoIds.value,

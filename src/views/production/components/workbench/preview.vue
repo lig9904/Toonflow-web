@@ -4,7 +4,7 @@
       <!-- 左侧预览区域 -->
       <div class="previewArea">
         <div class="videoWrapper">
-          <img v-if="currentShot?.filePath" :src="currentShot.filePath" :alt="currentShot.description" class="previewImage" />
+          <img v-if="currentShot?.filePath" :src="currentShot.filePath" :alt="currentShot.videoDesc || currentShot.description" class="previewImage" />
           <div v-else class="placeholderImage">
             <i-pic theme="outline" size="48" fill="#999" />
             <span>{{ $t("workbench.production.preview.noImage") }}</span>
@@ -58,7 +58,7 @@
           </div>
           <div class="sectionContent">
             【{{ $t("workbench.production.preview.serialNumber") }} {{ currentShotIndex + 1 }}】{{
-              currentShot?.description || $t("workbench.production.preview.noDescription")
+              currentShot?.videoDesc || currentShot?.description || $t("workbench.production.preview.noDescription")
             }}
           </div>
         </div>
@@ -153,11 +153,11 @@
               @click="selectShot(index)">
               <t-checkbox v-model="shot.selected" class="shotCheckbox" @click.stop @mousedown.stop />
               <div class="shotImageWrapper">
-                <img v-if="shot.filePath" :src="shot.filePath" :alt="shot.description" class="shotImage" />
+                <img v-if="shot.filePath" :src="shot.filePath" :alt="shot.videoDesc || shot.description" class="shotImage" />
                 <div v-else class="shotPlaceholder">
                   <i-pic theme="outline" size="24" fill="#999" />
                 </div>
-                <t-tag class="shotNumber" size="small" variant="dark">#{{ shot.id }}</t-tag>
+                <t-tag class="shotNumber" size="small" variant="dark">#{{ index + 1 }}</t-tag>
               </div>
             </div>
           </TransitionGroup>
@@ -187,6 +187,7 @@ interface Shot {
   camera?: number;
   createTime?: number;
   description?: string;
+  videoDesc?: string;
   duration?: number;
   filePath?: string;
   frameMode?: number;
@@ -214,6 +215,7 @@ async function getShotList() {
     scriptId: episodesId!.value,
   });
   shotList.value = data;
+  initialOrder.value = shotList.value.map((shot) => shot.id);
 }
 const currentShot = computed(() => shotList.value[currentShotIndex.value] || null);
 const currentCharacters = computed(() => currentShot.value?.characters || []);
@@ -229,7 +231,7 @@ const currentElapsed = ref(0);
 let playTimer: ReturnType<typeof setInterval> | null = null;
 const TICK_INTERVAL = 50;
 
-const initialOrder = shotList.value.map((shot) => shot.id);
+const initialOrder = ref<string[]>([]);
 
 // ===== 计算属性 =====
 
@@ -245,7 +247,7 @@ const totalProgress = computed(() => {
 });
 
 const promptTips = computed(() => [
-  { label: $t("workbench.production.preview.sceneDescription"), value: currentShot.value?.description },
+  { label: $t("workbench.production.preview.sceneDescription"), value: currentShot.value?.videoDesc || currentShot.value?.description },
   // { label: "运镜方式", value: currentShot.value?.camera != null ? String(currentShot.value.camera) : undefined },
   { label: $t("workbench.production.preview.promptLabel"), value: currentShot.value?.prompt },
 ]);
@@ -390,7 +392,7 @@ const confirmRestoreSort = () => {
     header: $t("workbench.production.preview.restoreSort"),
     body: $t("workbench.production.preview.restoreSortConfirm"),
     onConfirm: () => {
-      shotList.value.sort((a, b) => initialOrder.indexOf(a.id) - initialOrder.indexOf(b.id));
+      shotList.value.sort((a, b) => initialOrder.value.indexOf(a.id) - initialOrder.value.indexOf(b.id));
       dialog.destroy();
     },
     onClose: () => dialog.destroy(),
@@ -412,6 +414,7 @@ async function exportImage() {
     .filter((shot) => shot.selected)
     .map((shot) => ({
       id: shot.id,
+      number: shotList.value.findIndex((item) => item.id === shot.id) + 1,
       filePath: shot.filePath?.split("?")[0] || shot.filePath,
     }));
   if (selectedShots.length === 0) {
@@ -427,7 +430,7 @@ async function exportImage() {
       if (!shot.filePath) return;
       const response = await fetch(shot.filePath);
       const blob = await response.blob();
-      zip.file(`分镜${shot.id}.${getFileExtension(shot.filePath)}`, blob);
+      zip.file(`分镜${shot.number}.${getFileExtension(shot.filePath)}`, blob);
     } catch (error) {
       console.error(`图片下载失败: ${shot.filePath}`, error);
     }
