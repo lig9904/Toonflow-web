@@ -34,7 +34,7 @@
             </div>
           </template>
         </t-dropdown>
-        <t-popup :content="$t('workbench.production.save')">
+        <t-popup content="选用此图（图片已自动保存）">
           <t-button theme="primary" size="small" class="keepBottomLeftBtn" v-if="currentImageUrl" @click="handleKeep">
             <template #icon><i-save /></template>
           </t-button>

@@ -47,10 +47,13 @@ function makeProductionAgentStore(projectId: string) {
 
     const episodesId = ref<number>();
     const planningVersion = ref<number>();
+    const flowSaveStatus = ref<"idle" | "saving" | "saved" | "error">("idle");
+    const flowSaveError = ref("");
     const planningEpisodeId = ref<number>();
     const storyboardEditingIds = ref<number[]>([]);
     const builtinRuns = builtinAgentStore();
     let flowLoadSequence = 0;
+    let workflowRefreshSequence = 0;
     type PendingFlowSave = { scriptId: number; expectedPlanningVersion: number; loadSequence: number; snapshot: FlowData };
     let pendingFlowSave: PendingFlowSave | null = null;
     const readPendingFlowSave = (): PendingFlowSave | null => pendingFlowSave;
@@ -288,6 +291,8 @@ function makeProductionAgentStore(projectId: string) {
         }
         const expectedPlanningVersion = save.expectedPlanningVersion === planningVersion.value ? save.expectedPlanningVersion : planningVersion.value;
         try {
+          flowSaveStatus.value = "saving";
+          flowSaveError.value = "";
           const response = await axios.post("/production/saveFlowData", {
             projectId: Number(projectId),
             data: save.snapshot,
@@ -302,8 +307,11 @@ function makeProductionAgentStore(projectId: string) {
           if (save.scriptId === episodesId.value && save.scriptId === planningEpisodeId.value && save.loadSequence === flowLoadSequence) {
             planningVersion.value = nextVersion;
             applyStoryboardVersions(data?.storyboardVersions);
+            flowSaveStatus.value = "saved";
           }
         } catch (error) {
+          flowSaveStatus.value = "error";
+          flowSaveError.value = getProductionStateErrorMessage(error, "自动保存失败，草稿已保留");
           const status = getProductionStateErrorStatus(error);
           if (status === 409) {
             window.$message.warning("规划已被其他会话修改，本地草稿已保留；请重新载入后再合并");
@@ -322,6 +330,8 @@ function makeProductionAgentStore(projectId: string) {
     async function setFlowData(scriptId?: number): Promise<void> {
       const saveScriptId = scriptId ?? episodesId.value;
       if (saveScriptId == null || planningVersion.value == null || planningEpisodeId.value !== saveScriptId) {
+        flowSaveStatus.value = "error";
+        flowSaveError.value = "规划版本尚未读取，暂不保存";
         window.$message.warning("规划版本尚未读取，暂不保存");
         return;
       }
@@ -380,10 +390,17 @@ function makeProductionAgentStore(projectId: string) {
     async function refreshStoryboardWorkflow(scriptId = episodesId.value) {
       if (scriptId == null || scriptId !== episodesId.value) return;
       const requestSequence = flowLoadSequence;
+      const refreshSequence = ++workflowRefreshSequence;
       try {
         const result = await requestFlowData(scriptId);
-        if (requestSequence !== flowLoadSequence || episodesId.value !== scriptId) return;
+        if (requestSequence !== flowLoadSequence || refreshSequence !== workflowRefreshSequence || episodesId.value !== scriptId) return;
         mergeStoryboardWorkflow(result.data);
+        if (!flowSavePromise && !pendingFlowSave && (planningVersion.value == null || (result.planningVersion ?? -1) >= planningVersion.value)) {
+          flowData.value.scriptPlan = result.data.scriptPlan;
+          flowData.value.storyboardTable = result.data.storyboardTable;
+          planningVersion.value = result.planningVersion;
+          planningEpisodeId.value = scriptId;
+        }
       } catch (error) {
         console.error("[productionStateChanged] refresh workflow failed", error);
       }
@@ -708,6 +725,8 @@ function makeProductionAgentStore(projectId: string) {
       status,
       flowData,
       planningVersion,
+      flowSaveStatus,
+      flowSaveError,
       setFlowData,
       getFlowData,
       refreshStoryboard,

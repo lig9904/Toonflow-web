@@ -50,11 +50,7 @@
             <t-option value="9:16" label="9:16" />
             <t-option value="1:1" label="1:1" />
           </t-select>
-          <t-select v-model="data.quality" class="paramSelect ml-5" size="small" :placeholder="$t('workbench.production.editImage.quality')">
-            <t-option value="1K" label="1K" />
-            <t-option value="2K" label="2K" />
-            <t-option value="4K" label="4K" />
-          </t-select>
+          <imageQualitySelect v-model="data.quality" :model-key="data.model" class="paramSelect ml-5" size="small" />
         </div>
 
         <div class="f" style="gap: 5px; margin-left: 5px">
@@ -63,7 +59,7 @@
               <template #icon><i-arrow-up /></template>
             </t-button>
           </t-popup>
-          <t-popup :content="$t('workbench.production.save')">
+          <t-popup content="选用此图（图片已自动保存）">
             <t-button theme="primary" size="small" class="keepBtn" :disabled="generating" :loading="generating" @click="handleKeep">
               <template #icon><i-save /></template>
             </t-button>

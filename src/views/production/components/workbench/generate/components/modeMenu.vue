@@ -12,6 +12,7 @@
         variant="outline"
         :theme="modelParmas.audio ? 'success' : 'danger'"
         class="audio"
+        :disabled="modeOptions.audio !== 'optional'"
         @click="modelParmas.audio = !modelParmas.audio">
         <template #icon>
           <i-volume-notice v-if="modelParmas.audio" size="16" />
@@ -28,17 +29,12 @@
           <template #content>
             <div class="resolutionDurationPicker">
               <div
-                v-if="
-                  Array.isArray(modeOptions.durationResolutionMap) &&
-                  modeOptions.durationResolutionMap.length > 0 &&
-                  modeOptions.durationResolutionMap[0].resolution &&
-                  modeOptions.durationResolutionMap[0].resolution.length > 0
-                "
+                v-if="availableResolutions.length"
                 class="pickerSection">
                 <div class="pickerLabel">{{ $t("workbench.generate.resolution") }}</div>
                 <div class="pickerOptions">
                   <div
-                    v-for="res in modeOptions.durationResolutionMap[0].resolution"
+                    v-for="res in availableResolutions"
                     :key="res"
                     class="pickerOption"
                     :class="{ active: modelParmas.resolution == res }"
@@ -48,17 +44,12 @@
                 </div>
               </div>
               <div
-                v-if="
-                  Array.isArray(modeOptions.durationResolutionMap) &&
-                  modeOptions.durationResolutionMap.length > 0 &&
-                  modeOptions.durationResolutionMap[0].duration &&
-                  modeOptions.durationResolutionMap[0].duration.length > 0
-                "
+                v-if="availableDurations.length"
                 class="pickerSection">
                 <div class="pickerLabel">{{ $t("workbench.generate.duration") }}</div>
                 <div class="pickerOptions">
                   <div
-                    v-for="dur in modeOptions.durationResolutionMap[0].duration"
+                    v-for="dur in availableDurations"
                     :key="dur"
                     class="pickerOption"
                     :class="{ active: modelParmas.duration == dur }"
@@ -78,6 +69,7 @@
 <script setup lang="ts">
 import "@/views/production/components/workbench/type/type";
 import axios from "@/utils/axios";
+import { videoDurations, videoResolutions } from "@/utils/mediaQuality";
 import { createIdempotencyKey } from "@/utils/idempotency";
 import type { SelectOption, SelectValue } from "tdesign-vue-next";
 
@@ -98,6 +90,9 @@ const modelParmas = defineModel<ModelSetting>({
     audio: false,
   },
 });
+const availableDurations = computed(() => videoDurations(props.modeOptions));
+const availableResolutions = computed(() => videoResolutions(props.modeOptions, modelParmas.value.duration));
+watch(availableResolutions, (values) => { if (values.length && !values.includes(modelParmas.value.resolution)) modelParmas.value.resolution = values[0]; }, { immediate: true });
 const emit = defineEmits<{
   modeChange: [value: string];
   durationUpdated: [value: { trackId: number; version: number }];

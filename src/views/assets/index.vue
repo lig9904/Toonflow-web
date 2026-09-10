@@ -419,11 +419,7 @@
             <modelSelect v-model="selectValue" :type="`image`" />
           </t-form-item>
           <t-form-item :label="$t('workbench.assets.resolution')" name="resolution" v-if="batchType === $t('workbench.assets.batchGenImage')">
-            <t-select v-model="resolution" :placeholder="$t('workbench.assets.resolutionPh')">
-              <t-option key="1K" label="1K" value="1K" />
-              <t-option key="2K" label="2K" value="2K" />
-              <t-option key="4K" label="4K" value="4K" />
-            </t-select>
+            <imageQualitySelect v-model="resolution" :model-key="selectValue" />
           </t-form-item>
         </t-form>
       </div>

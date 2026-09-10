@@ -3,11 +3,13 @@
     :footer="false"
     :header="false"
     :closeBtn="false"
+    :close-on-esc-keydown="false"
     v-model:visible="visible"
     attach="body"
     placement="center"
     mode="full-screen"
     class="fullscreenDialog">
+    <div class="autosaveNotice">{{ autoSaveStatus }}<t-button v-if="autoSaveStatus.startsWith('保存失败')" size="small" variant="text" @click="retryAutosave">重试</t-button></div>
     <div class="closure">
       <i-close-small theme="outline" size="24" fill="#4a4a4a" @click="closeFn" />
     </div>
@@ -80,6 +82,7 @@ import "@vue-flow/core/dist/theme-default.css";
 import "@vue-flow/controls/dist/style.css";
 import removeLine from "./removeLine.vue";
 import projectStore from "@/stores/project";
+import userStore from "@/stores/user";
 
 import axios from "@/utils/axios";
 import type { NodeType, UploadNodeData, GeneratedNodeData } from "../../utils/editImageType";
@@ -108,6 +111,7 @@ const props = withDefaults(
       referanceImages: string[]; // 参考图url
     };
     type?: string;
+    draftKey?: string;
   }>(),
   {
     flowData: () => ({
@@ -128,12 +132,39 @@ const { addEdges, getNodes, getEdges, updateNodeData } = useVueFlow("editImage")
 const nodes = ref<NodeType[]>([]);
 const edges = ref<Edge<any, any, string>[]>([]);
 const activeFlowId = ref<number | null>(props.flowData.flowId ?? null);
+const autoSaveStatus = ref("自动保存");
+const autoSaveReady = ref(false);
+let autoSaveTimer: ReturnType<typeof setTimeout> | undefined;
+let saveInFlight: Promise<number> | undefined;
+let lastSavedDocument = "";
+const draftStorageKey = props.draftKey ? `toonflow:flow-draft:${userStore().user?.id}:${project.value?.id}:${episodesId?.value}:${props.draftKey}` : undefined;
+const editingScope = { projectId: Number(project.value?.id), scriptId: Number(episodesId?.value) };
+const documentSignature = () => JSON.stringify({ nodes: cleanNodes(getNodes.value as NodeType[]), edges: cleanEdges(getEdges.value) });
+watch(() => autoSaveReady.value ? documentSignature() : "", (document) => {
+  if (!autoSaveReady.value || !nodes.value.length || document === lastSavedDocument) return;
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => { void persistFlow().catch(() => undefined); }, 800);
+});
+onBeforeUnmount(() => { if (autoSaveTimer) clearTimeout(autoSaveTimer); });
+async function retryAutosave() { await persistFlow().catch(() => undefined); }
+async function persistFlow(): Promise<number> {
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  if (saveInFlight) { await saveInFlight; return persistFlow(); }
+  if (activeFlowId.value && documentSignature() === lastSavedDocument) return activeFlowId.value;
+  autoSaveStatus.value = "保存中…";
+  saveInFlight = persistFlowNow().then((id) => {
+    autoSaveStatus.value = "已保存";
+    if (draftStorageKey) { try { localStorage.setItem(draftStorageKey, String(id)); } catch {} }
+    return id;
+  }).catch((error) => { autoSaveStatus.value = `保存失败，草稿已保留：${error?.message || "请稍后重试"}`; throw error; }).finally(() => { saveInFlight = undefined; });
+  return saveInFlight;
+}
+
 const flowVersion = ref(0);
 const mutationKeys = new Map<string, string>();
 
 function flowScope() {
-  const projectId = Number(project.value?.id);
-  const scriptId = Number(episodesId?.value);
+  const { projectId, scriptId } = editingScope;
   if (!Number.isSafeInteger(projectId) || projectId <= 0 || !Number.isSafeInteger(scriptId) || scriptId <= 0) {
     throw new Error("项目或剧集上下文无效");
   }
@@ -257,20 +288,22 @@ const addUploadNode = (type: string, image: string = "", prompt: string = "") =>
 
   return newNodeId;
 };
-async function persistFlow() {
+async function persistFlowNow() {
   _doSyncReferences();
-  const document = { nodes: cleanNodes(getNodes.value as NodeType[]), edges: cleanEdges(getEdges.value) };
+  const document = JSON.parse(documentSignature());
   const scope = flowScope();
   if (activeFlowId.value != null) {
     const body = { ...document, ...scope, flowId: activeFlowId.value, expectedVersion: flowVersion.value };
     const { data } = await axios.post("/production/editImage/updateImageFlow", { ...body, idempotencyKey: mutationKey("update", body) });
     flowVersion.value = Number(data.version);
+    lastSavedDocument = JSON.stringify(document);
     return activeFlowId.value;
   }
   const body = { ...document, ...scope, expectedVersion: 0 as const };
   const { data } = await axios.post("/production/editImage/saveImageFlow", { ...body, idempotencyKey: mutationKey("create", body) });
   activeFlowId.value = Number(data.flowId ?? data.id);
   flowVersion.value = Number(data.version);
+  lastSavedDocument = JSON.stringify(document);
   return activeFlowId.value;
 }
 
@@ -286,6 +319,10 @@ async function sureNode(imageUrl: string) {
 }
 onMounted(async () => {
   try {
+    if (draftStorageKey) {
+      const savedId = Number(localStorage.getItem(draftStorageKey));
+      if (Number.isSafeInteger(savedId) && savedId > 0) activeFlowId.value = savedId;
+    }
     if (!activeFlowId.value) return buildFlow();
     const scope = flowScope();
     const { data } = await axios.post("/production/editImage/getImageFlow", {
@@ -297,10 +334,12 @@ onMounted(async () => {
     edges.value = data.edges.map((e: any) => ({ ...e, ...DEFAULT_EDGE_OPTIONS }));
     nodes.value = data.nodes;
     await nextTick();
-    setTimeout(() => fitView({ duration: 300 }), 100);
+    lastSavedDocument = documentSignature();
+    autoSaveStatus.value = "已保存";
+    setTimeout(() => fitView({ duration: 300, maxZoom: 0.8, padding: 0.3 }), 100);
   } catch (e) {
     window.$message.error((e as any).message || $t("workbench.production.editImage.fetchFailed"));
-  }
+  } finally { await nextTick(); autoSaveReady.value = true; }
 });
 
 function buildFlow() {
@@ -325,37 +364,26 @@ function buildFlow() {
   }
   nextTick(() => {
     syncReferences();
-    setTimeout(() => fitView({ duration: 300 }), 100);
+    setTimeout(() => fitView({ duration: 300, maxZoom: 0.8, padding: 0.3 }), 100);
   });
 }
 
-function closeFn() {
-  const dialog = DialogPlugin.confirm({
-    header: $t("workbench.production.editImage.closeConfirmTitle"),
-    body: $t("workbench.production.editImage.closeConfirmBody"),
-    confirmBtn: $t("common.confirm"),
-    cancelBtn: $t("common.cancel"),
-    onConfirm: async () => {
-      try {
-        if (activeFlowId.value) await persistFlow();
-        visible.value = false;
-        dialog.destroy();
-      } catch (e) {
-        window.$message.error((e as any).message || $t("workbench.production.editImage.saveFailed"));
-      }
-    },
-  });
+async function closeFn() {
+  try { await persistFlow(); visible.value = false; }
+  catch (error: any) { window.$message.error(error?.message || "自动保存失败，编辑内容已保留"); }
 }
+
 async function layoutGraph(direction: "LR" | "TB") {
   const oldData = toObject();
   oldData.nodes = layout(oldData.nodes, oldData.edges, direction);
   await fromObject(oldData);
   await nextTick();
-  fitView({ duration: 300 });
+  fitView({ duration: 300, maxZoom: 0.8, padding: 0.3 });
 }
 </script>
 
 <style lang="scss" scoped>
+.autosaveNotice { position: absolute; top: 12px; left: 24px; z-index: 10001; padding: 6px 10px; background: var(--td-bg-color-container); border-radius: 6px; }
 .fullscreenDialog {
   .closure {
     position: absolute;

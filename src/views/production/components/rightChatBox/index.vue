@@ -58,9 +58,9 @@
       </t-chat-list>
       <t-chat-sender
         class="inputBox"
-        :disabled="status === 'pending' || status === 'streaming'"
+        :disabled="composerBusy"
         v-model="inputValue"
-        :loading="status === 'pending' || status === 'streaming'"
+        :loading="composerBusy"
         :placeholder="$t('workbench.production.chatBox.inputPlaceholder')"
         @send="handleSend"
         @stop="handleStop">
@@ -143,6 +143,7 @@ const selectedBuiltinRun = computed(() => {
   const id = builtinRuns.selectedRunByScope[builtinScopeKey(builtinScope.value)];
   return id ? builtinRuns.runs[id] : undefined;
 });
+const composerBusy = computed(() => selectedBuiltinRun.value ? ["queued", "running"].includes(selectedBuiltinRun.value.status) : status.value === "pending" || status.value === "streaming");
 type VisibleChatMessage = ChatMessagesData & { artifact?: BuiltinArtifactView };
 const visibleMessages = computed<VisibleChatMessage[]>(() => {
   if (!selectedBuiltinRun.value) return messages.value as VisibleChatMessage[];
@@ -193,7 +194,9 @@ function handleSend(text: string) {
   inputValue.value = "";
 }
 function handleStop() {
-  productionAgentStore().stopGenerate();
+  if (selectedBuiltinRun.value && ["queued", "running"].includes(selectedBuiltinRun.value.status)) {
+    void builtinRuns.controlRun(selectedBuiltinRun.value.id, builtinScope.value, "cancel", "用户停止生成").catch(() => undefined);
+  } else productionAgentStore().stopGenerate();
 }
 function handleReconnect() {
   const dialog = DialogPlugin.confirm({

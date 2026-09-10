@@ -7,6 +7,7 @@ import {
   dedupeBuiltinRunEvents,
   defaultBuiltinRunLimits,
   isBuiltinRunTerminal,
+  builtinProductionPreview,
   type BuiltinAgentType,
   type BuiltinControlAction,
   type BuiltinDisplayMessage,
@@ -17,6 +18,7 @@ import {
   type BuiltinRunScope,
   type BuiltinRunStartResponse,
   type BuiltinRunView,
+  type BuiltinRunLimits,
   type BuiltinStartInput,
 } from "@/types/builtinAgent";
 
@@ -136,7 +138,10 @@ export default defineStore("builtinAgent", () => {
       if (!data.run) return runs.value[runId];
       setRun(data.run);
       mergeEvents(data.run, data.events);
-      if (isBuiltinRunTerminal(data.run.status)) stopPolling(runId);
+      if (isBuiltinRunTerminal(data.run.status)) {
+        if ((eventsByRun.value[runId]?.at(-1)?.sequence ?? 0) >= data.run.lastSequence) stopPolling(runId);
+        else startPolling(runId);
+      }
       return data.run;
     } catch (error) {
       const run = runs.value[runId];
@@ -174,10 +179,12 @@ export default defineStore("builtinAgent", () => {
     const scope = { agentType: input.agentType, projectId: input.projectId, scriptId: input.scriptId } satisfies BuiltinRunScope;
     const scopeKey = builtinScopeKey(scope);
     const limits = { ...defaultBuiltinRunLimits, ...(input.limits ?? {}) };
+    const requestLimits: Partial<BuiltinRunLimits> = { ...limits };
+    if (input.agentType === "productionAgent" && input.limits?.maxOutputTokens === undefined) delete requestLimits.maxOutputTokens;
     const request = {
       scope,
       prompt: input.prompt,
-      limits,
+      limits: requestLimits,
       ...(input.thinkLevel === undefined ? {} : { thinkLevel: input.thinkLevel }),
     };
     const fingerprint = builtinFingerprint(request);
@@ -195,7 +202,7 @@ export default defineStore("builtinAgent", () => {
         ...(input.scriptId == null ? {} : { scriptId: input.scriptId }),
         prompt: input.prompt,
         idempotencyKey: intent.idempotencyKey,
-        limits,
+        limits: requestLimits,
         ...(input.thinkLevel === undefined ? {} : { thinkLevel: input.thinkLevel }),
       });
       const data = unwrap<BuiltinRunStartResponse>(response);
@@ -260,6 +267,14 @@ export default defineStore("builtinAgent", () => {
     return artifactRevisionByScope.value[builtinScopeKey(scope)] ?? 0;
   }
 
+  function canvasPreview(scope: BuiltinRunScope, target: "scriptPlan" | "storyboardTable") {
+    for (const run of runsForScope(scope)) {
+      const preview = builtinProductionPreview(run, eventsByRun.value[run.id] ?? [], target);
+      if (preview) return preview;
+    }
+    return undefined;
+  }
+
   function hasActiveRun(scope: BuiltinRunScope): boolean {
     return Boolean(activeRunForScope(scope));
   }
@@ -304,6 +319,7 @@ export default defineStore("builtinAgent", () => {
     runsForScope,
     messagesForRun,
     artifactRevision,
+    canvasPreview,
     hasActiveRun,
     hasRun,
     clearError,

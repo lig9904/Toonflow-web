@@ -102,7 +102,7 @@
       </div>
       <div class="ac" style="gap: 10px">
         <t-button block variant="outline" @click="openManualAdd">新增分镜</t-button>
-        <t-button block @click="previewAll" :disabled="!storyboard.length">{{ $t("workbench.production.node.storyboard.gridPreview") }}</t-button>
+        <t-button block @click="previewAll" :loading="previewLoading" :disabled="!storyboard.some(item => !!item.src) || previewLoading">{{ $t("workbench.production.node.storyboard.gridPreview") }}</t-button>
         <t-button block @click="batchGenerateImage" :disabled="!storyboard.length || !selectedIds.length" :loading="generateLoading">
           {{ $t("workbench.production.node.storyboard.generateImage") }}
         </t-button>
@@ -125,7 +125,7 @@
         </t-form-item>
       </t-form>
     </t-dialog>
-    <editImage v-model="visible" v-if="visible" :flowData="currentRow" type="storyboard" @save="save" />
+    <editImage v-model="visible" v-if="visible" :flowData="currentRow" :draft-key="currentRowStoryboardInfo.id == null ? undefined : `storyboard:${currentRowStoryboardInfo.id}`" type="storyboard" @save="save" />
     <t-image-viewer
       v-model:visible="previewVisible"
       v-if="previewVisible"
@@ -177,6 +177,7 @@ const manualAddVisible = ref(false);
 const manualAdding = ref(false);
 const manualAddForm = reactive({ prompt: "", videoDesc: "", duration: 5 });
 const previewVisible = ref(false);
+const previewLoading = ref(false);
 const previewImages = ref<string[]>([]);
 const gridScale = useLocalStorage("storyboardGridScale", 1);
 
@@ -250,11 +251,11 @@ function closePreview() {
   previewImages.value = [];
 }
 async function downLoadImage() {
-  LoadingPlugin(true);
+  const loadingInstance = LoadingPlugin(true);
   const allIds = (storyboard.value ?? []).filter((s) => s.src).map((s) => s.id!);
   if (!allIds.length) {
     window.$message.warning($t("workbench.production.node.storyboard.noPreviewImages"));
-    LoadingPlugin(false);
+    loadingInstance?.hide();
     return;
   }
   try {
@@ -262,6 +263,7 @@ async function downLoadImage() {
       "/production/storyboard/downPreviewImage",
       {
         storyboardIds: allIds,
+        projectId: project.value?.id,
       },
       { responseType: "blob" },
     );
@@ -275,28 +277,31 @@ async function downLoadImage() {
   } catch {
     window.$message.error($t("workbench.production.node.storyboard.imageLoadFailed"));
   } finally {
-    LoadingPlugin(false);
+    loadingInstance?.hide();
   }
 }
 async function previewAll() {
-  LoadingPlugin(true);
+  if (previewLoading.value) return;
   const allIds = (storyboard.value ?? []).filter((s) => s.src).map((s) => s.id!);
   if (!allIds.length) {
     window.$message.warning($t("workbench.production.node.storyboard.noPreviewImages"));
-    LoadingPlugin(false);
     return;
   }
+  previewLoading.value = true;
   try {
     const { data } = await axios.post("/production/storyboard/previewImage", {
       storyboardIds: allIds,
       projectId: project.value?.id,
     });
+    if (typeof data !== "string" || !data.startsWith("data:image/")) throw new Error("尚无可预览的分镜图片");
     previewImages.value = [data];
     previewVisible.value = true;
-  } catch {
-    window.$message.error($t("workbench.production.node.storyboard.imageLoadFailed"));
+  } catch (error) {
+    previewVisible.value = false;
+    previewImages.value = [];
+    window.$message.error(getProductionStateErrorMessage(error, $t("workbench.production.node.storyboard.imageLoadFailed")));
   } finally {
-    LoadingPlugin(false);
+    previewLoading.value = false;
   }
 }
 const currentRowStoryboardInfo = ref<{ id: number | null; insertAfterIndex: number | null }>({
@@ -419,7 +424,8 @@ async function batchGenerateImage() {
     window.$message.success($t("workbench.production.node.storyboard.batchGenerateSuccess"));
     selectedIds.value = [];
   } catch (e) {
-    window.$message.error($t("workbench.production.node.storyboard.batchGenerateFailed"));
+    await productionAgent.getFlowData();
+    window.$message.error(getProductionStateErrorMessage(e, $t("workbench.production.node.storyboard.batchGenerateFailed")));
   } finally {
     generateLoading.value = false;
   }

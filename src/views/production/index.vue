@@ -34,10 +34,10 @@
       <scriptNode :id="props.id" v-model="flowData.script" :handleIds="props.data.handleIds" />
     </template>
     <template #node-scriptPlan="props">
-      <scriptPlan :id="props.id" v-model="flowData.scriptPlan" :handleIds="props.data.handleIds" />
+      <scriptPlan :id="props.id" v-model="flowData.scriptPlan" :preview="builtinRuns.canvasPreview(builtinScope, 'scriptPlan')" :handleIds="props.data.handleIds" />
     </template>
     <template #node-storyboardTable="props">
-      <storyboardTable :id="props.id" v-model="flowData.storyboardTable" :handleIds="props.data.handleIds" />
+      <storyboardTable :id="props.id" v-model="flowData.storyboardTable" :preview="builtinRuns.canvasPreview(builtinScope, 'storyboardTable')" :handleIds="props.data.handleIds" />
     </template>
     <template #node-assets="props">
       <assets :id="props.id" v-model="flowData.assets" :handleIds="props.data.handleIds" />
@@ -121,6 +121,9 @@ import { useLayout } from "./utils/dagre";
 import { useFlowBuilder } from "./utils/flowBuilder";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
+import builtinAgentStore from "@/stores/builtinAgent";
+const builtinRuns = builtinAgentStore();
+const builtinScope = computed(() => ({ agentType: "productionAgent" as const, projectId: Number(project.value?.id), scriptId: episodesId.value ?? null }));
 
 const { project } = storeToRefs(projectStore());
 import settingStore from "@/stores/setting";
@@ -164,6 +167,7 @@ function onSpaceMouseUp() {
 }
 
 useEventListener(document, "keydown", (e: KeyboardEvent) => {
+  if (e.target instanceof HTMLElement && e.target.closest("input, textarea, [contenteditable='true']")) return;
   if (e.code === "Space" && !e.repeat) {
     e.preventDefault();
     isSpacePressed.value = true;

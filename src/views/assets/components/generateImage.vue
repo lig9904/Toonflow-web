@@ -53,11 +53,7 @@
             </div>
             <div style="width: 40%; margin-left: 15px">
               <span style="font-size: 16px; font-weight: 900">{{ $t("workbench.assets.gen.selectResolution") }}</span>
-              <t-select v-model="resolution">
-                <t-option key="1K" label="1K" value="1K" />
-                <t-option key="2K" label="2K" value="2K" />
-                <t-option key="4K" label="4K" value="4K" />
-              </t-select>
+              <imageQualitySelect v-model="resolution" :model-key="selectValue" />
             </div>
           </div>
           <div class="generateButton" style="margin-top: 20px">

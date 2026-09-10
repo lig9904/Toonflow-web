@@ -15,14 +15,15 @@
     v-model:visible="dialogVisible"
     :header="$t('workbench.production.node.script.editDialog')"
     :width="'90vw'"
-    :confirm-btn="$t('workbench.production.save')"
-    :cancel-btn="$t('workbench.production.cancel')"
+    confirm-btn="完成"
+    :cancel-btn="null"
     @confirm="onConfirm"
     @cancel="onCancel"
     @close="onCancel"
     :close-on-overlay-click="false"
     placement="center"
     attach="body">
+    <div class="autosaveStatus">{{ saveStatus }}</div>
     <MdEditor
       v-model="editContent"
       :theme="resolveThemeMode(themeSetting.mode)"
@@ -43,6 +44,9 @@ import type { ToolbarNames } from "md-editor-v3";
 import settingStore from "@/stores/setting";
 import { resolveThemeMode } from "@/utils/theme";
 import productionAgentStore from "@/stores/productionAgent";
+import projectStore from "@/stores/project";
+import axios from "@/utils/axios";
+import { createIdempotencyKey } from "@/utils/idempotency";
 const { themeSetting } = storeToRefs(settingStore());
 
 const props = defineProps<{
@@ -81,21 +85,55 @@ const toolbars: ToolbarNames[] = [
   "preview",
 ];
 
-function openEdit() {
-  editContent.value = script.value ?? "";
-  dialogVisible.value = true;
+const saveStatus = ref("自动保存");
+let editor: { id: number; projectId: number; name: string; version: number; workspaceVersion: number } | undefined;
+let lastSavedText = "";
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+let saving: Promise<void> | undefined;
+let saveIntent: { signature: string; key: string } | undefined;
+async function openEdit() {
+  try {
+    const projectId = Number(projectStore().project?.id);
+    const response: any = await axios.post("/script/getScrptApi", { projectId, name: "" });
+    const row = response.data.find((item: any) => Number(item.id) === productionAgentStore().episodesId);
+    if (!row) throw new Error("当前剧集不可用");
+    editor = { id: Number(row.id), projectId, name: row.name, version: Number(row.version), workspaceVersion: Number(response.workspaceVersion) };
+    editContent.value = row.content;
+    lastSavedText = row.content;
+    script.value = row.content;
+    saveStatus.value = "自动保存";
+    dialogVisible.value = true;
+  } catch (error: any) { window.$message.error(error?.message || "无法加载剧本版本"); }
 }
-
-function onConfirm() {
-  script.value = editContent.value;
-  productionAgentStore().setFlowData();
-
-  dialogVisible.value = false;
+async function saveDraft(): Promise<void> {
+  if (saveTimer) clearTimeout(saveTimer);
+  if (saving) { await saving; return saveDraft(); }
+  if (!editor || editContent.value === lastSavedText) return;
+  const text = editContent.value;
+  const body = { id: editor.id, projectId: editor.projectId, name: editor.name, content: text, expectedVersion: editor.version, workspaceExpectedVersion: editor.workspaceVersion };
+  const signature = JSON.stringify(body);
+  if (saveIntent?.signature !== signature) saveIntent = { signature, key: createIdempotencyKey("script-autosave") };
+  saveStatus.value = "保存中…";
+  saving = axios.post("/script/updateScript", { ...body, idempotencyKey: saveIntent.key }).then(({ data }: any) => {
+    editor!.version = Number(data.script.version);
+    editor!.workspaceVersion = Number(data.workspaceVersion);
+    lastSavedText = text;
+    script.value = text;
+    saveIntent = undefined;
+    saveStatus.value = "已保存";
+  }).catch((error: any) => {
+    saveStatus.value = `保存失败，草稿已保留：${error?.message || "请稍后重试"}`;
+  }).finally(() => { saving = undefined; });
+  await saving;
 }
-
-function onCancel() {
-  dialogVisible.value = false;
-}
+watch(editContent, () => {
+  if (!dialogVisible.value) return;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { void saveDraft(); }, 700);
+});
+onBeforeUnmount(() => { if (saveTimer) clearTimeout(saveTimer); });
+async function onConfirm() { await saveDraft(); dialogVisible.value = saveStatus.value.startsWith("保存失败"); }
+async function onCancel() { await onConfirm(); }
 
 function onPaste(e: ClipboardEvent) {
   const items = e.clipboardData?.items;

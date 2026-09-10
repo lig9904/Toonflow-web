@@ -193,7 +193,7 @@
             <modelSelect v-model="selectValue" :type="`image`" />
           </t-form-item>
           <t-form-item :label="$t('workbench.cornerScape.resolution')">
-            <t-select v-model="editForm.resolution" :placeholder="$t('workbench.cornerScape.resolutionPh')" :options="resolutionOptions" />
+            <imageQualitySelect v-model="editForm.resolution" :model-key="selectValue" />
           </t-form-item>
           <t-form-item :label="$t('workbench.cornerScape.promptLabel')">
             <t-loading style="width: 100%" :loading="currentItem.promptState == '生成中'">

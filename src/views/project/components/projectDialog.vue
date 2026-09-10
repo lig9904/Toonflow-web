@@ -28,11 +28,7 @@
             <t-form-item :label="$t('workbench.project.dialog.modelData')">
               <div class="ac" style="gap: 5px; width: 100%">
                 <modelSelect v-model="formState.imageModel" type="image" />
-                <t-select v-model="formState.imageQuality" class="paramSelect ml-5" :placeholder="$t('workbench.production.editImage.quality')">
-                  <t-option value="1K" label="1K" />
-                  <t-option value="2K" label="2K" />
-                  <t-option value="4K" label="4K" />
-                </t-select>
+                <imageQualitySelect v-model="formState.imageQuality" :model-key="formState.imageModel" class="paramSelect ml-5" />
               </div>
             </t-form-item>
             <t-form-item :label="$t('workbench.project.dialog.videoModelData')">

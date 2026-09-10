@@ -62,6 +62,17 @@ export function builtinUsesIndependentOutput(run: BuiltinRunView): boolean {
     && (run.intent as Record<string, unknown>).outputBudgetMode === "model_per_call";
 }
 
+export function builtinProductionPreview(run: BuiltinRunView, events: BuiltinRunEvent[], target: "scriptPlan" | "storyboardTable"): { text: string } | undefined {
+  if (run.agentType !== "productionAgent" || run.status !== "running") return undefined;
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    const data = event.data as { target?: string; text?: unknown; kind?: string } | null;
+    if (event.type === "artifact.saved" && ((target === "scriptPlan" && data?.kind === "productionPlanning") || (target === "storyboardTable" && data?.kind === "storyboards"))) return undefined;
+    if (event.type === "artifact.preview" && data?.target === target && typeof data.text === "string") return { text: data.text };
+  }
+  return undefined;
+}
+
 export interface BuiltinRunEvent {
   runId: string;
   sequence: number;

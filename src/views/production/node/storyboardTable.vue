@@ -2,13 +2,14 @@
   <t-card class="storyboardTable">
     <div class="titleBar dragHandle pr">
       <div class="title c">{{ $t("workbench.production.node.storyboardTable.title") }}</div>
-      <t-button size="small" variant="text" @click="openEdit">{{ $t("workbench.production.edit") }}</t-button>
+      <t-tag v-if="preview" theme="primary" variant="light">正在生成 · 未保存</t-tag>
+      <t-button size="small" variant="text" :disabled="!!preview" @click="openEdit">{{ $t("workbench.production.edit") }}</t-button>
       <Handle :id="props.handleIds.target" type="target" :position="Position.Left" style="left: calc(-1 * var(--td-comp-paddingLR-xl))" />
       <Handle :id="props.handleIds.source" type="source" :position="Position.Right" style="right: calc(-1 * var(--td-comp-paddingLR-xl))" />
     </div>
     <div class="storyboardList">
-      <t-empty v-if="!storyboardTable" style="margin-top: 16px"></t-empty>
-      <MdPreview v-else v-model="storyboardTable" :theme="resolveThemeMode(themeSetting.mode)" />
+      <t-empty v-if="!preview?.text && !storyboardTable" style="margin-top: 16px"></t-empty>
+      <MdPreview v-else :model-value="preview?.text ?? storyboardTable" :theme="resolveThemeMode(themeSetting.mode)" />
     </div>
   </t-card>
 
@@ -16,14 +17,15 @@
     v-model:visible="dialogVisible"
     :header="$t('workbench.production.node.storyboardTable.editDialog')"
     :width="'90vw'"
-    :confirm-btn="$t('workbench.production.save')"
-    :cancel-btn="$t('workbench.production.cancel')"
+    confirm-btn="完成"
+    :cancel-btn="null"
     @confirm="onConfirm"
     @cancel="onCancel"
     @close="onCancel"
     :close-on-overlay-click="false"
     placement="center"
     attach="body">
+    <div class="autosaveStatus">{{ saveLabel }}<span v-if="editorStore.flowSaveStatus === 'error'">：{{ editorStore.flowSaveError }}</span></div>
     <MdEditor
       v-model="editContent"
       :theme="resolveThemeMode(themeSetting.mode)"
@@ -48,6 +50,7 @@ const { themeSetting } = storeToRefs(settingStore());
 
 const props = defineProps<{
   id: string;
+  preview?: { text: string };
   handleIds: {
     target: string;
     source: string;
@@ -57,6 +60,29 @@ const props = defineProps<{
 const storyboardTable = defineModel<string>({ required: true });
 const editContent = ref("");
 const dialogVisible = ref(false);
+const editorStore = productionAgentStore();
+const saveLabel = computed(() => ({ idle: "自动保存", saving: "保存中…", saved: "已保存", error: "保存失败，草稿已保留" })[editorStore.flowSaveStatus]);
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
+let editingEpisode: number | undefined;
+let editBaseText = "";
+async function saveDraft() {
+  if (saveTimer) clearTimeout(saveTimer);
+  if (editingEpisode !== editorStore.episodesId || editContent.value === storyboardTable.value) return;
+  if (storyboardTable.value !== editBaseText) {
+    editorStore.flowSaveStatus = "error";
+    editorStore.flowSaveError = "内容已被其他成员更新，请合并后再保存；当前编辑草稿已保留";
+    return;
+  }
+  storyboardTable.value = editContent.value;
+  editBaseText = editContent.value;
+  await editorStore.setFlowData(editingEpisode);
+}
+watch(editContent, () => {
+  if (!dialogVisible.value) return;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { void saveDraft(); }, 700);
+});
+onBeforeUnmount(() => { if (saveTimer) clearTimeout(saveTimer); void saveDraft(); });
 
 const toolbars: ToolbarNames[] = [
   "bold",
@@ -83,20 +109,17 @@ const toolbars: ToolbarNames[] = [
 ];
 
 function openEdit() {
+  editingEpisode = editorStore.episodesId;
+  editBaseText = storyboardTable.value;
   editContent.value = storyboardTable.value ?? "";
   dialogVisible.value = true;
 }
 
-function onConfirm() {
-  storyboardTable.value = editContent.value;
-  dialogVisible.value = false;
-  productionAgentStore().setFlowData();
-
+async function onConfirm() {
+  await saveDraft();
+  dialogVisible.value = editorStore.flowSaveStatus === "error";
 }
-
-function onCancel() {
-  dialogVisible.value = false;
-}
+async function onCancel() { await onConfirm(); }
 
 function onPaste(e: ClipboardEvent) {
   const items = e.clipboardData?.items;

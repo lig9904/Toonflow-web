@@ -62,7 +62,10 @@ import modeMenu from "./components/modeMenu.vue";
 import videoCard from "./components/video.vue";
 import "@/views/production/components/workbench/type/type";
 import axios from "@/utils/axios";
+import { nearestVideoDuration, videoResolutions } from "@/utils/mediaQuality";
 import projectStore from "@/stores/project";
+import userStore from "@/stores/user";
+import { useLocalStorage } from "@vueuse/core";
 import promptEditor from "@/components/promptEditor.vue";
 import imageListCacheStore from "@/stores/imageListCache";
 import { createGenerationIntentStore } from "@/utils/generationIntent";
@@ -91,7 +94,7 @@ const modeOptions = ref<VideoModel>({
 
 const trackList = ref<TrackItem[]>([]); // 轨道列表
 
-const modelParmas = ref<ModelSetting>({
+const modelParmas = useLocalStorage<ModelSetting>(`toonflow:video-settings:${userStore().user?.id}:${project.value?.id}:${episodesId.value}`, {
   mode: "",
   model: "",
   resolution: "480p",
@@ -199,13 +202,9 @@ const currentTrack = computed({
 
 /** 将时长限制在模型支持的范围内 */
 function clampDuration(trackDuration: number): number {
-  const drMap = modeOptions.value?.durationResolutionMap;
-  if (Array.isArray(drMap) && drMap.length > 0 && drMap[0].duration?.length) {
-    const durations = drMap[0].duration;
-    return Math.max(Math.min(...durations), Math.min(trackDuration, Math.max(...durations)));
-  }
-  return trackDuration;
+  return nearestVideoDuration(modeOptions.value, trackDuration);
 }
+
 watch(
   () => modelParmas.value.model,
   (val) => {
@@ -222,12 +221,16 @@ watch(
       return;
     }
     axios.post("/modelSelect/getModelDetail", { modelId: val }).then(({ data }) => {
+      if (modelParmas.value.model !== val || data?.type !== "video") return;
       modeOptions.value = data;
-      modelParmas.value.audio = data.audio === true || data.audio === "true" || data.audio == "optional";
+      if (data.audio === true || data.audio === "true") modelParmas.value.audio = true;
+      else if (data.audio === false || data.audio === "false") modelParmas.value.audio = false;
       const drMap = data.durationResolutionMap;
       if (Array.isArray(drMap) && drMap.length > 0) {
-        if (drMap[0].resolution?.length) modelParmas.value.resolution = drMap[0].resolution[0];
-        if (drMap[0].duration?.length) modelParmas.value.duration = clampDuration(modelParmas.value.duration);
+
+        modelParmas.value.duration = clampDuration(modelParmas.value.duration);
+        const resolutions = videoResolutions(data, modelParmas.value.duration);
+        if (!resolutions.includes(modelParmas.value.resolution)) modelParmas.value.resolution = resolutions[0] ?? "";
       }
 
       const currentParsed = parseMode(modelParmas.value.mode);
@@ -245,6 +248,7 @@ watch(
       }
     });
   },
+  { immediate: true },
 );
 function parseMode(value: string): VideoMode | null {
   if (!value) return null;
@@ -437,8 +441,8 @@ watch(
 );
 
 onMounted(() => {
-  modelParmas.value.model = project.value?.videoModel || "";
-  modelParmas.value.mode = project.value?.mode || "";
+  if (!modelParmas.value.model) modelParmas.value.model = project.value?.videoModel || "";
+  if (!modelParmas.value.mode) modelParmas.value.mode = project.value?.mode || "";
   getGenerateData();
   if (hasGenerateVideoIds.value && hasGenerateVideoIds.value.length) {
     startPoll();

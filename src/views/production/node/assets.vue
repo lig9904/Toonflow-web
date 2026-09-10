@@ -71,7 +71,7 @@
         </div>
       </div>
     </div>
-    <editImage v-model="visible" v-if="visible" :flowData="currentRow" @save="save" />
+    <editImage v-model="visible" v-if="visible" :flowData="currentRow" :draft-key="`asset:${currentAssetsId}`" @save="save" />
   </t-card>
 </template>
 

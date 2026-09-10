@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { videoDurations, videoResolutions, nearestVideoDuration } from "../src/utils/mediaQuality.ts";
 import {
   builtinFingerprint,
   builtinHumanQuestion,
   builtinUsesIndependentOutput,
+  builtinProductionPreview,
   builtinRunMessages,
   builtinScopeKey,
   dedupeBuiltinRunEvents,
@@ -42,6 +44,17 @@ const run = {
 };
 
 const first = [event(1, "a"), event(2, "b")];
+const videoModel = { durationResolutionMap: [{ duration: [3, 5], resolution: ["720p", "1080p"] }, { duration: [10], resolution: ["720p"] }] };
+assert.deepEqual(videoDurations(videoModel), [3, 5, 10]);
+assert.deepEqual(videoResolutions(videoModel, 10), ["720p"]);
+assert.deepEqual(videoResolutions(videoModel, 8), []);
+assert.equal(nearestVideoDuration(videoModel, 8), 10);
+const previewRun = { ...run, agentType: "productionAgent" as const, status: "running" as const };
+const previewEvent: BuiltinRunEvent = { ...event(1, ""), type: "artifact.preview", data: { target: "scriptPlan", text: "Draft" } };
+assert.deepEqual(builtinProductionPreview(previewRun, [previewEvent], "scriptPlan"), { text: "Draft" });
+assert.equal(builtinProductionPreview({ ...previewRun, status: "failed" }, [previewEvent], "scriptPlan"), undefined);
+assert.equal(builtinProductionPreview(previewRun, [previewEvent, { ...event(2, ""), type: "artifact.saved", data: { kind: "productionPlanning" } }], "scriptPlan"), undefined);
+assert.equal(builtinProductionPreview(previewRun, [previewEvent], "storyboardTable"), undefined);
 assert.equal(builtinUsesIndependentOutput({ ...run, agentType: "productionAgent", intent: { outputBudgetMode: "model_per_call" } }), true);
 assert.equal(builtinUsesIndependentOutput({ ...run, agentType: "productionAgent" }), false);
 assert.equal(builtinUsesIndependentOutput({ ...run, intent: { outputBudgetMode: "model_per_call" } }), false);
