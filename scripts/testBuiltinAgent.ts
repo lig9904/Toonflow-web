@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   builtinFingerprint,
   builtinHumanQuestion,
+  builtinUsesIndependentOutput,
   builtinRunMessages,
   builtinScopeKey,
   dedupeBuiltinRunEvents,
@@ -41,6 +42,9 @@ const run = {
 };
 
 const first = [event(1, "a"), event(2, "b")];
+assert.equal(builtinUsesIndependentOutput({ ...run, agentType: "productionAgent", intent: { outputBudgetMode: "model_per_call" } }), true);
+assert.equal(builtinUsesIndependentOutput({ ...run, agentType: "productionAgent" }), false);
+assert.equal(builtinUsesIndependentOutput({ ...run, intent: { outputBudgetMode: "model_per_call" } }), false);
 const replay = dedupeBuiltinRunEvents(first, [event(2, "b"), event(3, "c")]);
 assert.deepEqual(replay.map((item) => item.sequence), [1, 2, 3], "replayed event sequences are deduplicated");
 assert.equal(builtinHumanQuestion({ question: "请选择第 3 镜" }), "请选择第 3 镜", "waiting question survives event replay");

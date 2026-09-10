@@ -54,6 +54,12 @@ export interface BuiltinRunView {
   errorCode: string | null;
   errorMessage: string | null;
   result: unknown;
+  intent?: unknown;
+}
+
+export function builtinUsesIndependentOutput(run: BuiltinRunView): boolean {
+  return run.agentType === "productionAgent" && !!run.intent && typeof run.intent === "object" && !Array.isArray(run.intent)
+    && (run.intent as Record<string, unknown>).outputBudgetMode === "model_per_call";
 }
 
 export interface BuiltinRunEvent {

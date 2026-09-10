@@ -40,6 +40,7 @@
         <span>视频 {{ selectedRun.videoGenerations ?? 0 }}/{{ selectedRun.limits.maxVideoGenerations }}</span>
         <span>执行者：{{ executionUserLabel }}</span>
       </div>
+      <div v-if="builtinUsesIndependentOutput(selectedRun)" class="muted">各步骤独立调用模型 · 文本累计 {{ selectedRun.outputTokens ?? 0 }} tokens</div>
       <div v-if="selectedRun.status === 'waiting_human'" class="humanTask">
         <div class="humanQuestion">{{ waitingQuestion || "运行正在等待你的处理" }}</div>
         <div class="answerRow">
@@ -66,6 +67,7 @@ import userStore from "@/stores/user";
 import {
   builtinScopeKey,
   builtinHumanQuestion,
+  builtinUsesIndependentOutput,
   isBuiltinRunTerminal,
   type BuiltinAgentType,
   type BuiltinControlAction,
