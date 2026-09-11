@@ -4,7 +4,7 @@
     <span v-else class="reviewError" @click="refresh">{{ error }} · 重试</span>
     <t-dialog v-model:visible="visible" header="图片核验" :footer="false" width="640px" attach="body">
       <template v-if="review">
-        <p v-if="review.targetKind === 'flow'" class="reviewWarning">这是当前结果图片的核验记录。Flow 没有统一的选用指针，核验标记需结合当前画布与参考素材查看。</p>
+        <p v-if="review.targetKind === 'flow'" class="reviewWarning">核验依据生成时的图片和参考素材。后续编辑或更换参考素材后，请结合当前画布判断。</p>
         <p v-else-if="review.stale" class="reviewWarning">图片、参考素材或文字已发生变化，以下是历史核验结果。</p>
         <p>{{ review.summary || '核验正在进行，结果会自动更新。' }}</p>
         <p v-if="['passed','issues'].includes(review.status)" class="reviewMeta">{{ review.referenceCoverage === 'complete' ? '已检查实际生成图和全部参考图' : review.referenceCoverage === 'partial' ? '已检查生成图，部分参考图未能核验' : '仅检查生成图；参考身份一致性未核验' }}</p>
