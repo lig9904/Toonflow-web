@@ -35,14 +35,7 @@
             <modelSelect v-model="selectValue" :type="`image`" />
           </t-form-item>
           <t-form-item :label="$t('workbench.cornerScape.resolution')">
-            <t-select
-              v-model="resolution"
-              :placeholder="$t('workbench.cornerScape.resolutionPh')"
-              :options="[
-                { label: '1K', value: '1K' },
-                { label: '2K', value: '2K' },
-                { label: '4K', value: '4K' },
-              ]"></t-select>
+            <imageQualitySelect v-model="resolution" :model-key="selectValue" />
           </t-form-item>
           <t-form-item :label="$t('workbench.cornerScape.textPromptInput')">
             <t-textarea v-model="otherTextPrompt" :placeholder="$t('workbench.cornerScape.textPromptPh')"></t-textarea>
@@ -282,11 +275,6 @@ const { project } = storeToRefs(projectStore());
 const selectValue = ref(project.value?.imageModel ?? "");
 const resolution = ref("1K");
 const otherTextPrompt = ref("");
-const resolutionOptions = [
-  { label: "1K", value: "1K" },
-  { label: "2K", value: "2K" },
-  { label: "4K", value: "4K" },
-];
 const options = ref([
   { labelKey: "workbench.cornerScape.filterRole", value: "role" },
   { labelKey: "workbench.cornerScape.filterScene", value: "scene" },

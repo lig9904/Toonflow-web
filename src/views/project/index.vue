@@ -73,7 +73,7 @@ const editProjectData = ref<{
   imageModel: string;
   videoModel: string;
   projectType: string;
-  imageQuality: "1K" | "2K" | "4K" | "";
+  imageQuality: "1K" | "2K" | "3K" | "4K" | "";
   mode: string;
   directorManual: string;
   version?: number;
@@ -133,7 +133,7 @@ function openEdit(item: {
   videoRatio: string | null;
   imageModel: string;
   videoModel: string;
-  imageQuality: "1K" | "2K" | "4K" | "";
+  imageQuality: "1K" | "2K" | "3K" | "4K" | "";
   projectType: string;
   mode: string;
   version?: number;
@@ -154,7 +154,7 @@ function editProjectFn(data: {
   videoRatio: string;
   imageModel: string;
   videoModel: string;
-  imageQuality: "1K" | "2K" | "4K" | "";
+  imageQuality: "1K" | "2K" | "3K" | "4K" | "";
   mode: string;
   expectedVersion?: number;
   mutationKey?: string;
