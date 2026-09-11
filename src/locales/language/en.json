@@ -182,7 +182,7 @@
       "linkAdd": "confirm"
     },
     "agent": {
-      "bannerDesc": "It is recommended to use the official DeepSeek V4",
+      "bannerDesc": "It is recommended to use the official DeepSeek V4.1 Flash",
       "visitWebsite": "Visit Website",
       "fillKey": "Enter KEY",
       "oneClickFill": "One-Click Fill",
