@@ -590,11 +590,14 @@ async function polishPrompts() {
     const { data } = await axios.post("/assetsGenerate/polishAssetsPrompt", {
       projectId: project.value?.id,
       assetsId: editForm.assetsId,
+      expectedVersion: dataList.value.find(i => i.id === editForm.assetsId)?.version,
+      idempotencyKey: createIdempotencyKey("asset-polish"),
       type: editForm.type ?? "props",
       name: editForm.name,
       describe: editForm.describe,
     });
     window.$message.success($t("workbench.cornerScape.msg.promptGenSuccess"));
+    if (data.pending) {window.$message.info("提示词任务已接受，可在素材列表查看结果");return;}
     if (data.assetsId === editForm.assetsId) {
       editForm.prompt = data.prompt;
     }
@@ -625,8 +628,10 @@ async function batchGenerationPrompt() {
   try {
     await axios.post("/assetsGenerate/batchPolishAssetsPrompt", {
       projectId: project.value?.id,
+      idempotencyKey: createIdempotencyKey("batch-polish"),
       items: items.map((item) => ({
         assetsId: item.id,
+        expectedVersion: item.version,
         type: item.type ?? "props",
         name: item.name,
         describe: item.describe,
@@ -757,11 +762,12 @@ async function pollingPromptAssets() {
     const { data } = await axios.post("/assets/pollingPromptAssets", { ids });
     let hasCompleted = false;
     if (Array.isArray(data) && data.length) {
-      data.forEach((item: { id: number; promptState: string; prompt: string }) => {
+      data.forEach((item: { id: number; promptState: string; prompt: string; version?: number }) => {
         const target = dataList.value.find((row) => row.id === item.id);
         if (target) {
           if (target.promptState === "生成中" && item.promptState !== "生成中") hasCompleted = true;
           target.promptState = item.promptState;
+          if(Number.isSafeInteger(item.version))target.version = Number(item.version);
           if (item.prompt !== undefined) target.prompt = item.prompt;
         }
       });
@@ -775,12 +781,12 @@ async function pollingPromptAssets() {
         });
         (freshData as DataItem[]).forEach((fresh) => {
           const target = dataList.value.find((row) => row.id === fresh.id);
-          if (target) target.historyImages = fresh.historyImages;
+          if (target) {target.historyImages = fresh.historyImages;target.version = fresh.version;}
         });
         // 同步更新抽屉中的当前项
         if (currentItem.value) {
           const freshCurrent = (freshData as DataItem[]).find((d) => d.id === currentItem.value!.id);
-          if (freshCurrent) currentItem.value.historyImages = freshCurrent.historyImages;
+          if (freshCurrent) {currentItem.value.historyImages = freshCurrent.historyImages;currentItem.value.version = freshCurrent.version;}
         }
       } catch (e) {
         console.error("刷新历史图片失败:", e);
@@ -816,12 +822,12 @@ async function pollingImageAssets() {
         });
         (freshData as DataItem[]).forEach((fresh) => {
           const target = dataList.value.find((row) => row.id === fresh.id);
-          if (target) target.historyImages = fresh.historyImages;
+          if (target) {target.historyImages = fresh.historyImages;target.version = fresh.version;}
         });
         // 同步更新抽屉中的当前项
         if (currentItem.value) {
           const freshCurrent = (freshData as DataItem[]).find((d) => d.id === currentItem.value!.id);
-          if (freshCurrent) currentItem.value.historyImages = freshCurrent.historyImages;
+          if (freshCurrent) {currentItem.value.historyImages = freshCurrent.historyImages;currentItem.value.version = freshCurrent.version;}
         }
       } catch (e) {
         console.error("刷新历史图片失败:", e);

@@ -238,7 +238,9 @@ async function handleExtractAssets() {
   try {
     await axios.post("/script/extractAssets", {
       scriptIds: selectedIds.value,
-      projectId: project.value!.id,
+      versions: scripts.value.filter(s => selectedIds.value.includes(s.id)).map(s => ({ id: s.id, expectedVersion: s.version })),
+      idempotencyKey: createIdempotencyKey("manual-extract"),
+      projectId: Number(project.value!.id),
       groupSize: otherSetting.value.assetsBatchGenereateSize,
     });
     searchScripts();

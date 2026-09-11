@@ -66,7 +66,7 @@
               <t-button theme="primary" variant="text" @click="openEditPrompt(row)">
                 {{ $t("settings.memory.modelMap.editPrompt") }}
               </t-button>
-              <t-button theme="danger" variant="text" @click="delPrompt(row)">
+              <t-button v-if="!row.managedKey" theme="danger" variant="text" @click="delPrompt(row)">
                 {{ $t("settings.memory.modelMap.delPrompt") }}
               </t-button>
             </t-space>
@@ -121,6 +121,7 @@
 import { ref } from "vue";
 import type { TableProps } from "tdesign-vue-next";
 import axios from "@/utils/axios";
+import {createIdempotencyKey} from "@/utils/idempotency";
 import { MdEditor, MdPreview } from "md-editor-v3";
 import type { ToolbarNames } from "md-editor-v3";
 import settingStore from "@/stores/setting";
@@ -154,6 +155,8 @@ interface ModelMap {
 const modelMap = ref<ModelMap[]>([]);
 
 interface PromptItem {
+  version: string;
+  managedKey?: string;
   name: string;
   type: string;
   data: string;
@@ -216,9 +219,11 @@ const promptForm = ref<PromptList>({
 });
 //当前选中的供应商
 const currentSupplier = ref("");
+const bindingBeforePath = ref("");
 function promptEditor(item: ModelMap, value: PromptList) {
   visible.value = true;
-  promptForm.value = value;
+  bindingBeforePath.value = value.path || "";
+  promptForm.value = {...value};
   currentSupplier.value = item.id;
   getPromptList();
 }
@@ -269,10 +274,10 @@ function unselectPrompt() {
 
 // 新增/编辑提示词弹窗
 const addPromptVisible = ref(false);
-const editingPrompt = ref({ isEdit: false, name: "", type: "video", data: "" });
+const editingPrompt = ref({ isEdit: false, name: "", type: "video", data: "", version: "" });
 
 function openAddPrompt() {
-  editingPrompt.value = { isEdit: false, name: "", type: "video", data: "" };
+  editingPrompt.value = { isEdit: false, name: "", type: "video", data: "", version: "" };
   addPromptVisible.value = true;
 }
 
@@ -284,8 +289,10 @@ function delPrompt(row: PromptItem) {
   axios
     .post("/setting/modelMap/deletePrompt", {
       path: row.path,
+      expectedVersion: row.version,
+      idempotencyKey: createIdempotencyKey("delete-model-prompt"),
     })
-    .then((res) => {});
+    .then(() => getPromptList());
 }
 async function onAddPromptConfirm() {
   if (!editingPrompt.value.name.trim()) {
@@ -297,12 +304,16 @@ async function onAddPromptConfirm() {
       name: editingPrompt.value.name,
       type: editingPrompt.value.type,
       data: editingPrompt.value.data,
+      expectedVersion: editingPrompt.value.version,
+      idempotencyKey: createIdempotencyKey("model-prompt"),
     });
   } else {
     await axios.post("/setting/modelMap/savePrompt", {
       name: editingPrompt.value.name,
       type: editingPrompt.value.type,
       data: editingPrompt.value.data,
+      expectedVersion: editingPrompt.value.version,
+      idempotencyKey: createIdempotencyKey("model-prompt"),
     });
   }
   window.$message.success($t("settings.memory.modelMap.promptSaveSuccess"));
@@ -316,6 +327,7 @@ function onConfirm() {
     vendorId: currentSupplier.value,
     model: promptForm.value.model,
     path: promptForm.value.path,
+    expectedPath: bindingBeforePath.value,
     fileName: promptForm.value.fileName,
   };
   axios

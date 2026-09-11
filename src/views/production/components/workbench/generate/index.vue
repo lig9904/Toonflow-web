@@ -36,7 +36,7 @@
             <div class="promptInput" @focusout="handlePromptBlur">
               <promptEditor v-model="currentTrack.prompt" :references="references" :placeholder="$t('workbench.generate.promptPlaceholder')" />
             </div>
-            <details v-if="currentTrack.promptReview && currentTrack.prompt === currentTrack.promptReviewPrompt" class="promptReview">
+            <details v-if="currentTrack.promptReview && currentTrack.prompt === currentTrack.promptReviewPrompt && currentTrack.promptReviewContext === reviewContextSignature(currentTrack)" class="promptReview">
               <summary>{{ currentTrack.promptReview.status === 'passed' ? '提示词核验完成' : currentTrack.promptReview.status === 'failed' ? '提示词核验未完成' : '提示词核验提示' }}{{ currentTrack.promptReview.revised ? ' · 已作最小修正' : '' }}</summary>
               <p>{{ currentTrack.promptReview.summary }}</p>
               <ul><li v-for="(finding,index) in currentTrack.promptReview.findings" :key="index">{{ finding.message }}</li></ul>
@@ -97,7 +97,7 @@ const { project } = storeToRefs(projectStore());
 const episodesId = inject<Ref<number>>("episodesId")!;
 const activeTrackIndex = ref(0);
 const cacheStore = imageListCacheStore();
-const generationIntents = createGenerationIntentStore<{ videoId: number }>();
+const generationIntents = createGenerationIntentStore<{ videoId: number; promptReview?: VideoPromptReview | null }>();
 const generateVideoPending = ref(false);
 const promptMutationIntents = new Map<number, { signature: string; key: string }>();
 const promptSavePromises = new Map<number, { signature: string; promise: Promise<boolean> }>();
@@ -178,6 +178,23 @@ function orderReferenceItems(items: UploadItem[]): UploadItem[] {
   // and in multi-reference modes it determines @图片/@视频/@音频 numbering.
   return [...items];
 }
+
+function promptReferenceInfo(track: TrackItem, requireSrc = false): Array<{ id: number; sources: "storyboard" | "assets"; fileType?: "image" | "video" | "audio" }> {
+  if (modelParmas.value.mode === "text") return [];
+  const active = positiveId(currentTrack.value?.id) === positiveId(track.id);
+  const raw = (active ? imageList.value : track.medias) as UploadItem[];
+  const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
+  const sliced = frameMode.includes(modelParmas.value.mode) ? raw.slice(0, 2) : modelParmas.value.mode === "singleImage" ? raw.slice(0, 1) : raw;
+  return sliced.filter((item) => (!requireSrc || Boolean(item.src)) && positiveId(item.id) != null && (item.sources === "storyboard" || item.sources === "assets"))
+    .map((item) => ({ id: positiveId(item.id)!, sources: item.sources as "storyboard" | "assets", fileType: item.fileType }));
+}
+
+function reviewInputForTrack(track: TrackItem) {
+  const active = positiveId(currentTrack.value?.id) === positiveId(track.id);
+  const duration = active ? modelParmas.value.duration : (resolveDuration(sourceDurationForTrack(track)).duration ?? sourceDurationForTrack(track));
+  return { trackId: track.id, model: modelParmas.value.model, mode: modelParmas.value.mode, generation: { duration, resolution: modelParmas.value.resolution, audio: Boolean(modelParmas.value.audio) }, info: promptReferenceInfo(track, true) };
+}
+function reviewContextSignature(track: TrackItem): string { return JSON.stringify(reviewInputForTrack(track)); }
 
 function modeChange(newVal: string) {
   if (newVal == modelParmas.value.mode) return;
@@ -560,24 +577,7 @@ async function genText() {
   if (!scope || !scopeReady.value || !track || currentTrackId == null || track.state === "生成中") return;
   const previousJobId = typeof track.promptJobId === "string" ? track.promptJobId : undefined;
   if (!promptGenerationGate.begin([currentTrackId], new Map([[currentTrackId, previousJobId ?? null]]))) return;
-  let info: { id: number; sources: string; fileType?: string }[] = [];
-  const rawMedias = (track.medias ?? []) as UploadItem[];
-  if (modelParmas.value.mode == "text") {
-    info = []; // Text-to-video sends no visual references; source storyboards remain server-side.
-  } else {
-    const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
-    const preSliced = frameMode.includes(modelParmas.value.mode)
-      ? rawMedias.slice(0, 2)
-      : modelParmas.value.mode === "singleImage"
-        ? rawMedias.slice(0, 1)
-        : rawMedias;
-    const filtered = preSliced
-      .filter((item) => positiveId(item.id) != null)
-      .map(({ id, sources, fileType }) => ({ id: id!, sources, fileType }));
-    if (frameMode.includes(modelParmas.value.mode)) info = filtered.slice(0, 2);
-    else if (modelParmas.value.mode === "singleImage") info = filtered.slice(0, 1);
-    else info = filtered;
-  }
+  const info = promptReferenceInfo(track);
   const saved = await saveTrackPrompt(track, scope);
   if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
   if (!saved) {
@@ -717,10 +717,13 @@ async function generateVideo() {
       const scope = `single:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${String(track.id)}`;
       generateVideoPending.value = true;
       try {
-        const { videoId } = await generationIntents.run(scope, requestData, async (idempotencyKey) => {
+        const { videoId, promptReview } = await generationIntents.run(scope, requestData, async (idempotencyKey) => {
           const { data } = await axios.post("/production/workbench/generateVideo", { ...requestData, idempotencyKey });
-          return { videoId: data.videoId };
+          return { videoId: data.videoId, promptReview: data.promptReview };
         });
+        track.promptReview = promptReview ?? null;
+        track.promptReviewPrompt = track.prompt;
+        track.promptReviewContext = reviewContextSignature(track);
         window.$message.success($t("workbench.generate.generateStarted"));
         track.videoList.push({
           id: videoId,
@@ -811,6 +814,7 @@ async function getTrackPromptList() {
       scriptId: scope.scriptId,
       trackIds: [...requestedIds],
       jobIds,
+      reviewInputs: trackList.value.map(reviewInputForTrack),
     });
     if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     if (Array.isArray(data)) {
@@ -835,6 +839,7 @@ async function getTrackPromptList() {
           if (item.jobId) findData.promptJobId = item.jobId;
           findData.promptReview = item.promptReview ?? null;
           findData.promptReviewPrompt = item.prompt;
+          findData.promptReviewContext = item.promptReview ? reviewContextSignature(findData) : undefined;
           const terminal = item.state === "已完成" || item.state === "生成失败";
           if (findData.state !== item.state) findData.state = item.state;
           if ((item.state === "已完成" || item.state === "生成中") && !localDraft && item.prompt !== findData.prompt) findData.prompt = item?.prompt ?? "";

@@ -54,6 +54,7 @@ interface VideoPromptReview {
 interface TrackItem {
   promptReview?: VideoPromptReview | null;
   promptReviewPrompt?: string;
+  promptReviewContext?: string;
   id: number;
   version?: number;
   prompt: string;

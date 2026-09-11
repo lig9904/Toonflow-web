@@ -85,7 +85,7 @@ import { captureGenerateScope, positiveId, sameGenerateScope, validTrackIds, typ
 
 const { otherSetting } = storeToRefs(settingStore());
 const generationIntents = createGenerationIntentStore();
-const batchRequestIntents = createGenerationIntentStore<Array<{ videoId: number; trackId: number; jobId?: string; reused?: boolean }>>();
+const batchRequestIntents = createGenerationIntentStore<Array<{ videoId: number; trackId: number; jobId?: string; reused?: boolean; promptReview?: VideoPromptReview | null }>>();
 const { project } = storeToRefs(projectStore());
 const { removeCache } = imageListCacheStore();
 const episodesId = inject<Ref<number>>("episodesId")!;
@@ -360,6 +360,7 @@ async function batchGenText() {
     }
     trackData.push({
       trackId,
+      expectedVersion: track.version,
       info: info.filter((i) => positiveId(i.id) != null),
       idempotencyKey: "pending",
       generation: {duration: props.resolveDuration(props.sourceDuration(track)).duration ?? props.sourceDuration(track), resolution: props.modelParmas.resolution, audio: Boolean(props.modelParmas.audio)},
@@ -519,8 +520,16 @@ function batchGenVideo() {
           if (payload) generationIntents.markSuccess(intentScope, payload.idempotencyKey);
         });
         const videoRecordId: Record<number, number> = {};
-        data.forEach((item: { videoId: number; trackId: number }) => {
+        data.forEach((item: { videoId: number; trackId: number; promptReview?: VideoPromptReview | null }) => {
           videoRecordId[item.trackId] = item.videoId;
+          const track = checkedTrackData.find((candidate) => candidate.id === item.trackId);
+          const payload = trackData.find((candidate) => candidate.trackId === item.trackId);
+          if (track && payload) {
+            track.promptReview = item.promptReview ?? null;
+            track.promptReviewPrompt = track.prompt;
+            track.promptReviewContext = JSON.stringify({ trackId: track.id, model: props.modelParmas.model, mode: props.modelParmas.mode,
+              generation: { duration: payload.duration, resolution: props.modelParmas.resolution, audio: Boolean(props.modelParmas.audio) }, info: payload.uploadData });
+          }
         });
         checkedTrackData.forEach((i) => {
           if (videoRecordId[i.id])

@@ -717,8 +717,10 @@ async function handleBatchGeneratePrompt() {
     await axios.post("/assetsGenerate/batchPolishAssetsPrompt", {
       projectId: project.value?.id,
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
-      items: selectedAssets.map((item: { id: number; name: string; type: string; describe: string }) => ({
+      idempotencyKey: createIdempotencyKey("batch-polish"),
+      items: selectedAssets.map((item: { id: number; version?: number; name: string; type: string; describe: string }) => ({
         assetsId: item.id,
+        expectedVersion: item.version,
         type: item.type ?? "props",
         name: item.name,
         describe: item.describe ? item.describe : $t("workbench.assets.noDescription"),

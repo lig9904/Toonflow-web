@@ -326,16 +326,20 @@ async function handleBatchGeneratePrompt() {
 async function generatePrompt(data: AssetItem) {
   rowPromptLoading.value[data.id] = true;
   try {
-    const res = await axios.post("/assets/polishAssetsPrompt", {
+    const res = await axios.post("/assetsGenerate/polishAssetsPrompt", {
       projectId: project.value?.id,
       assetsId: data.id,
+      expectedVersion: (data as AssetItem & {version?:number}).version,
+      idempotencyKey: createIdempotencyKey("asset-polish"),
       type: props.type ?? "props",
       name: data.name,
       describe: data.describe ?? "",
     });
+    if(res.data.pending) return;
     const index = tableData.value.findIndex((item: AssetItem) => item.id === res.data.assetsId);
     if (index !== -1 && !promptGenerateCancel.value) {
       tableData.value[index].prompt = res.data.prompt;
+      Object.assign(tableData.value[index],{version:res.data.version});
       // 同步更新 localData
       const localIndex = localData.value.findIndex((item: AssetItem) => item.id === res.data.assetsId);
       if (localIndex !== -1) {
@@ -404,7 +408,8 @@ async function startGenerate(data: { id: number; prompt: string; name: string; t
       id: data.id,
     });
     if (!imageGenerateCancel.value) {
-      const index = tableData.value.findIndex((item: AssetItem) => item.id === res.data.assetsId);
+      if(res.data.pending) return;
+    const index = tableData.value.findIndex((item: AssetItem) => item.id === res.data.assetsId);
       if (index !== -1) {
         tableData.value[index].filePath = res.data.path;
         // 同步更新 localData

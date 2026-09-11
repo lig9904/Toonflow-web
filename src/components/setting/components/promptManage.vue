@@ -55,7 +55,7 @@
         <section v-if="panelKey === selectedKey && panel" class="detail-panel">
           <div class="panel-heading"><h4>{{ panel === 'history' ? '版本历史' : '组合预览' }}</h4><button class="text-button" @click="panel = ''">收起</button></div>
           <div v-if="panel === 'preview' && isVideoPrompt" class="preview-config">
-            <p class="muted">按已启用模型的真实能力编译。以下为本次预览参数，不会更改生成设置或调用模型。</p>
+            <p class="muted">按已启用模型的真实能力编译。以下为本次预览参数，已选项目会一并载入其风格规范；不会更改生成设置或调用模型。</p>
             <div class="preview-fields">
               <label>视频模型<select aria-label="视频模型" v-model="previewModel" :disabled="modelsLoading" @change="loadPreviewCapabilities"><option value="">{{ modelsLoading ? '读取模型中…' : '选择已启用视频模型' }}</option><option v-for="model in previewModels" :key="model.id + ':' + model.value" :value="model.id + ':' + model.value">{{ model.name }} · {{ model.label }}</option></select></label>
               <label>实际模式<select aria-label="实际模式" v-model="previewMode" :disabled="!previewCapabilities" @change="syncPreviewReferences"><option value="">选择模式</option><option v-for="mode in previewModes" :key="mode.value" :value="mode.value">{{ mode.label }}</option></select></label>
@@ -99,6 +99,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import axios from "@/utils/axios";
+import projectStore from "@/stores/project";
 import userStore from "@/stores/user";
 import { getPromptDraftSession, type PromptEntry, type PromptDraft } from "./promptDraftController";
 interface HistoryItem { version: string; content: string; actor: string; operation: string; createdAt: string }
@@ -175,7 +176,7 @@ async function compilePreview() {
   if (!canCompilePreview.value) return;
   const key = selectedKey.value; const sequence = ++panelSequence; panelLoading.value = true; panelError.value = "";
   try {
-    const { data } = await axios.post("/setting/promptManage/previewPrompt", { key, model: previewModel.value, mode: JSON.parse(previewMode.value), referenceCount: previewReferenceCount.value, scriptDuration: previewScriptDuration.value, generation: { duration: previewDuration.value, resolution: previewResolution.value, audio: previewAudio.value } });
+    const { data } = await axios.post("/setting/promptManage/previewPrompt", { key, ...(Number(projectStore().project?.id) > 0 ? { projectId: Number(projectStore().project?.id) } : {}), model: previewModel.value, mode: JSON.parse(previewMode.value), referenceCount: previewReferenceCount.value, scriptDuration: previewScriptDuration.value, generation: { duration: previewDuration.value, resolution: previewResolution.value, audio: previewAudio.value } });
     if (!disposed && sequence === panelSequence && key === selectedKey.value) preview.value = data;
   } catch (error) { if (sequence === panelSequence) panelError.value = (error as Error)?.message || "组合预览失败"; }
   finally { if (sequence === panelSequence) panelLoading.value = false; }

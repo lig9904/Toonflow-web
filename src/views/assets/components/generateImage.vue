@@ -181,12 +181,16 @@ async function generatePrompt() {
     const { data } = await axios.post("/assetsGenerate/polishAssetsPrompt", {
       projectId: project.value?.id,
       assetsId: props.formData.id,
+      expectedVersion: props.formData.version,
+      idempotencyKey: createIdempotencyKey("asset-polish"),
       type: props.formData.type ?? "props",
       name: props.formData.name,
       describe: props.formData.describe ? props.formData.describe : $t("workbench.assets.noDescription"),
     });
     window.$message.success($t("workbench.assets.gen.promptSuccess"));
+    if (data.pending) {window.$message.info("提示词任务已接受，可在素材列表查看结果");return;}
     if (data.assetsId === props.formData.id) {
+      props.formData.version = data.version;
       props.formData.prompt = data.prompt;
     }
   } catch (e: any) {
