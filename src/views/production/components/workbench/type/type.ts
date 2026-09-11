@@ -45,7 +45,15 @@ interface StoryboardItem {
   videoDesc?: string | null;
 }
 
+interface VideoPromptReview {
+  status: "passed" | "issues" | "failed" | "pending" | "skipped";
+  findings: Array<{code: string; severity: string; message: string; shotId?: number}>;
+  summary: string; revised: boolean; reviewedAt: number;
+}
+
 interface TrackItem {
+  promptReview?: VideoPromptReview | null;
+  promptReviewPrompt?: string;
   id: number;
   version?: number;
   prompt: string;

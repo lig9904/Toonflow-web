@@ -33,6 +33,7 @@
         </t-tooltip>
       </div>
     </div>
+    <ImageReviewBadge v-if="data.generatedImage" class="flow-image-review" :project-id="projectId" :script-id="scriptId" target-kind="flow" :target-id="flowId ?? id" :src="data.generatedImage" match-by-artifact />
     <div v-show="selected" class="parameter" @wheel.stop @mousedown.stop>
       <div class="imageRefs f w">
         <div v-for="(item, index) in data.references" :key="index" class="refThumb">
@@ -74,6 +75,7 @@
 <script setup lang="ts">
 import { Handle, useVueFlow, Position } from "@vue-flow/core";
 import modelSelect from "@/components/modelSelect.vue";
+import ImageReviewBadge from "@/components/reviews/imageReviewBadge.vue";
 import PromptEditor from "@/components/promptEditor.vue";
 import axios from "@/utils/axios";
 import { type GeneratedNodeData } from "../../utils/editImageType";
@@ -214,6 +216,7 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
+.flow-image-review { align-self: stretch; padding: 4px 8px; }
 .generatedNode {
   position: relative;
   width: 320px;

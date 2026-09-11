@@ -70,6 +70,7 @@
                   </t-tooltip>
                 </div>
               </div>
+              <ImageReviewBadge :project-id="project?.id" :script-id="episodesId" target-kind="storyboard" :target-id="item.id" :src="item.src" />
               <div class="addBetween addBetween--right" :class="{ expanded: hoveredIndex === index }">
                 <t-button
                   theme="primary"
@@ -137,6 +138,7 @@
 </template>
 
 <script setup lang="ts">
+import ImageReviewBadge from "@/components/reviews/imageReviewBadge.vue";
 import { useLocalStorage } from "@vueuse/core";
 import editImage from "../components/editImage/index.vue";
 import { LoadingPlugin } from "tdesign-vue-next";

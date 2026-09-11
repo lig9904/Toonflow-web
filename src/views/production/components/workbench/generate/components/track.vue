@@ -362,12 +362,13 @@ async function batchGenText() {
       trackId,
       info: info.filter((i) => positiveId(i.id) != null),
       idempotencyKey: "pending",
+      generation: {duration: props.resolveDuration(props.sourceDuration(track)).duration ?? props.sourceDuration(track), resolution: props.modelParmas.resolution, audio: Boolean(props.modelParmas.audio)},
     });
     track.state = "生成中";
   });
   trackData.forEach((item) => {
     const track = trackList.value.find((candidate) => positiveId(candidate.id) === item.trackId);
-    const signature = JSON.stringify({ projectId: scope.projectId, scriptId: scope.scriptId, model: props.modelParmas.model, mode: props.modelParmas.mode, trackId: item.trackId, info: item.info, expectedVersion: track?.version });
+    const signature = JSON.stringify({ projectId: scope.projectId, scriptId: scope.scriptId, model: props.modelParmas.model, mode: props.modelParmas.mode, trackId: item.trackId, info: item.info, generation: item.generation, expectedVersion: track?.version });
     const previous = props.promptGenerationGate.getIntent(item.trackId);
     const intent = previous?.signature === signature ? previous : { signature, key: createIdempotencyKey("batch-video-prompt"), startedAt: Date.now() };
     props.promptGenerationGate.setIntent(item.trackId, intent);

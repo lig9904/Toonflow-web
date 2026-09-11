@@ -28,6 +28,7 @@
                 <t-tag theme="success">{{ $t("workbench.production.node.assets.originalAsset") }}</t-tag>
               </div>
               <div class="cardDesc">{{ asset.desc }}</div>
+              <ImageReviewBadge :project-id="project?.id" :script-id="episodesId" target-kind="asset" :target-id="asset.id" :src="asset.src" />
             </div>
           </t-card>
           <div class="divider">
@@ -62,6 +63,7 @@
                   <t-tag theme="warning">{{ $t("workbench.production.node.assets.derived") }}</t-tag>
                 </div>
                 <div class="cardDesc">{{ item.desc }}</div>
+                <ImageReviewBadge :project-id="project?.id" :script-id="episodesId" target-kind="asset" :target-id="item.id" :src="item.src" />
               </div>
             </t-card>
             <t-card v-if="asset.derive.length <= 0" class="assetCard emptyCard">
@@ -77,6 +79,7 @@
 
 <script setup lang="ts">
 import { Handle, Position, type Edge } from "@vue-flow/core";
+import ImageReviewBadge from "@/components/reviews/imageReviewBadge.vue";
 import editImage from "../components/editImage/index.vue";
 import { type AssetItem, type DeriveAsset } from "../utils/flowBuilder";
 import axios from "@/utils/axios";

@@ -36,6 +36,11 @@
             <div class="promptInput" @focusout="handlePromptBlur">
               <promptEditor v-model="currentTrack.prompt" :references="references" :placeholder="$t('workbench.generate.promptPlaceholder')" />
             </div>
+            <details v-if="currentTrack.promptReview && currentTrack.prompt === currentTrack.promptReviewPrompt" class="promptReview">
+              <summary>{{ currentTrack.promptReview.status === 'passed' ? '提示词核验完成' : currentTrack.promptReview.status === 'failed' ? '提示词核验未完成' : '提示词核验提示' }}{{ currentTrack.promptReview.revised ? ' · 已作最小修正' : '' }}</summary>
+              <p>{{ currentTrack.promptReview.summary }}</p>
+              <ul><li v-for="(finding,index) in currentTrack.promptReview.findings" :key="index">{{ finding.message }}</li></ul>
+            </details>
           </div>
         </t-card>
       </div>
@@ -437,7 +442,7 @@ async function loadGenerateData(scope: GenerateScope, requestSequence: number) {
 
   if (!Array.isArray(data?.storyboardList) || !Array.isArray(data?.trackList) || data.trackList.some((track: TrackItem) => positiveId(track.id) == null)) throw new Error("片段数据格式无效");
   const storyboardData = data.storyboardList;
-  const trackData: TrackItem[] = data.trackList.map((track: TrackItem) => ({ ...track, id: positiveId(track.id)! }));
+  const trackData: TrackItem[] = data.trackList.map((track: TrackItem) => ({ ...track, id: positiveId(track.id)!, promptReviewPrompt: track.prompt }));
   // 优先使用本地缓存，没有缓存则用后端数据并写入缓存
   initCacheFromTrackList(scope.projectId, scope.scriptId, trackData);
   await warmUpUrls(scope.projectId, scope.scriptId);
@@ -581,7 +586,7 @@ async function genText() {
   }
   track.state = "生成中";
   track.promptJobId = null;
-  const promptPayload = { projectId: scope.projectId, scriptId: scope.scriptId, trackId: currentTrackId, info, model: modelParmas.value.model, mode: modelParmas.value.mode, expectedVersion: track.version };
+  const promptPayload = { projectId: scope.projectId, scriptId: scope.scriptId, trackId: currentTrackId, info, model: modelParmas.value.model, mode: modelParmas.value.mode, generation: {duration: modelParmas.value.duration, resolution: modelParmas.value.resolution, audio: Boolean(modelParmas.value.audio)}, expectedVersion: track.version };
   const promptSignature = JSON.stringify(promptPayload);
   const previousIntent = promptGenerationIntents.get(currentTrackId);
   const promptIntent = previousIntent?.signature === promptSignature ? previousIntent : { signature: promptSignature, key: createIdempotencyKey("video-prompt"), startedAt: Date.now() };
@@ -810,7 +815,7 @@ async function getTrackPromptList() {
     if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     if (Array.isArray(data)) {
       const returnedIds = new Set<number>();
-      data.forEach((item: { id: number; jobId?: string; idempotencyKey?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number }) => {
+      data.forEach((item: { id: number; jobId?: string; idempotencyKey?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number; promptReview?: VideoPromptReview | null }) => {
         const findData = trackList.value.find((t) => t.id == item.id);
         returnedIds.add(Number(item.id));
         if (findData) {
@@ -828,6 +833,8 @@ async function getTrackPromptList() {
           if (pending?.submitted && item.jobId && item.idempotencyKey === submittedIntent?.key) pending.jobId = item.jobId;
           if (pending && (!pending.submitted || !pending.jobId || pending.jobId !== item.jobId)) return;
           if (item.jobId) findData.promptJobId = item.jobId;
+          findData.promptReview = item.promptReview ?? null;
+          findData.promptReviewPrompt = item.prompt;
           const terminal = item.state === "已完成" || item.state === "生成失败";
           if (findData.state !== item.state) findData.state = item.state;
           if ((item.state === "已完成" || item.state === "生成中") && !localDraft && item.prompt !== findData.prompt) findData.prompt = item?.prompt ?? "";
@@ -946,3 +953,5 @@ onUnmounted(() => {
   }
 }
 </style>
+
+<style scoped>.promptReview{padding:8px 12px;font-size:13px;color:#56616e;max-height:180px;overflow:auto}.promptReview summary{cursor:pointer;color:#0052d9}.promptReview li{margin:6px 0}</style>
