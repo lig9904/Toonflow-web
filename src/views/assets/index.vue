@@ -786,6 +786,7 @@ async function handleBatchGenerateImage() {
         type: item.type ?? "props",
         name: item.name ?? $t("workbench.cornerScape.unnamed"),
         prompt: item.prompt || item.describe,
+        expectedVersion: item.version,
       })),
     });
   } catch (e: any) {

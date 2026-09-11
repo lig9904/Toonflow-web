@@ -381,6 +381,7 @@ async function handleBatchGenerateImage() {
             name: item.name,
             prompt: item.prompt,
             type: props.type ?? "props",
+            version: item.version,
           }),
         ),
       );
@@ -395,7 +396,7 @@ async function handleBatchGenerateImage() {
     imageGenerateCancel.value = false;
   }
 }
-async function startGenerate(data: { id: number; prompt: string; name: string; type: string }) {
+async function startGenerate(data: { id: number; prompt: string; name: string; type: string; version?: number }) {
   if (imageGenerateCancel.value) return;
   rowImageLoading.value[data.id] = true;
   try {
@@ -405,6 +406,7 @@ async function startGenerate(data: { id: number; prompt: string; name: string; t
       name: data.name,
       base64: undefined,
       prompt: data.prompt ?? "",
+      expectedVersion: data.version,
       id: data.id,
     });
     if (!imageGenerateCancel.value) {

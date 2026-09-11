@@ -538,6 +538,7 @@ function regenerateItem() {
         name: item.name ?? $t("workbench.cornerScape.unnamed"),
         base64: "",
         prompt: editForm.prompt,
+        expectedVersion: item.version,
         model: selectValue.value,
         id: item.id,
         resolution: editForm.resolution,
@@ -732,6 +733,7 @@ async function batchGenerationImage() {
         type: item.type ?? "props",
         name: item.name ?? $t("workbench.cornerScape.unnamed"),
         prompt: item.prompt,
+        expectedVersion: item.version,
       })),
     });
     selectedIds.value = [];

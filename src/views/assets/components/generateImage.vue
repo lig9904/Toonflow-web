@@ -237,6 +237,7 @@ async function handleGenerate() {
       name: props.formData.name ?? $t("workbench.assets.gen.unnamed"),
       base64: referenceImageBase64,
       prompt: props.formData.prompt,
+      expectedVersion: props.formData.version,
       model: selectValue.value,
       id: props.formData.id,
       resolution: resolution.value,
