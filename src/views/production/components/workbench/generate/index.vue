@@ -108,6 +108,7 @@ import { createIdempotencyKey } from "@/utils/idempotency";
 import { captureGenerateScope, positiveId, sameGenerateScope, type GenerateScope, type PromptGenerationIntent } from "./utils/scope";
 import {
   buildVideoReferences,
+  buildResolvedReferencePreviews,
   captureVideoGenerationSettings,
   modeIntentForTrack,
   modeIntentSelectValue,
@@ -603,26 +604,8 @@ watch(
 );
 /** uploadBox 作为 promptEditor 的引用预览 */
 const references = computed(() => {
-  function getFileTypeByExt(src: string | undefined): "image" | "video" | "audio" {
-    if (!src) return "image";
-    // 去掉 query 和 hash 部分
-    const cleanSrc = src.split("?")[0].split("#")[0];
-    const ext = cleanSrc.split(".").pop()?.toLowerCase() ?? "";
-
-    if (["mp4", "webm", "mov", "avi", "mkv"].includes(ext)) return "video";
-    if (["mp3", "wav", "ogg", "aac", "flac", "m4a"].includes(ext)) return "audio";
-    return "image";
-  }
-
-  const resolved = currentTrack.value?.resolvedReferences;
-  const resolvedKeys = resolved ? new Set(resolved.map((item) => `${item.sources}:${item.id}`)) : undefined;
-  return imageList.value
-    .filter((item) => !resolvedKeys || resolvedKeys.has(`${item.sources}:${item.id}`))
-    .filter((item) => item.src)
-    .map((item) => ({
-      type: getFileTypeByExt(item.src) as "image" | "video" | "audio" | "text",
-      src: item.src ?? "",
-    }));
+  const selected = currentTrack.value?.resolvedReferences ?? buildVideoReferences(imageList.value, currentModeIntent.value);
+  return buildResolvedReferencePreviews(selected, imageList.value);
 });
 
 async function getGenerateData() {

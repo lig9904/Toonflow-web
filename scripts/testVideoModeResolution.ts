@@ -3,6 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import {
   buildVideoReferences,
+  buildResolvedReferencePreviews,
   captureVideoGenerationSettings,
   defaultReferencePurpose,
   modeIntentForTrack,
@@ -10,6 +11,7 @@ import {
   modeIntentSelectValue,
   parseModeIntentValue,
   referenceSignature,
+  referenceTypeOrdinals,
   referencesNeedReview,
   restoreReferenceSelection,
   videoModeLabel,
@@ -97,6 +99,34 @@ test("server reference order and purposes restore exactly after a track switch o
     [62, "first_frame", "/62.png"],
     [61, "identity_reference", "/61.png"],
   ]);
+});
+
+test("resolved first-tail order controls prompt chips even when the user selected tail first", () => {
+  const cupA = { id: 91, sources: "assets" as const, fileType: "audio" as const, src: "/cup-a.png" };
+  const cupB = { id: 92, sources: "assets" as const, fileType: "image" as const, src: "/cup-b.png" };
+  const previews = buildResolvedReferencePreviews([
+    { id: 91, sources: "assets", fileType: "image", purpose: "first_frame" },
+    { id: 92, sources: "assets", fileType: "image", purpose: "last_frame" },
+  ], [cupB, cupA]);
+  assert.deepEqual(previews.map((item) => [item.src, item.type]), [["/cup-a.png", "image"], ["/cup-b.png", "image"]]);
+});
+
+test("mixed media keep independent numbering and missing previews keep their slot", () => {
+  const previews = buildResolvedReferencePreviews([
+    { id: 101, sources: "assets", fileType: "image" },
+    { id: 102, sources: "assets", fileType: "video" },
+    { id: 103, sources: "assets", fileType: "image" },
+    { id: 104, sources: "assets", fileType: "audio" },
+    { id: 105, sources: "assets", fileType: "image" },
+  ], [
+    { id: 104, sources: "assets", src: "/sound.wav" },
+    { id: 103, sources: "assets", src: "/second.png" },
+    { id: 102, sources: "assets", src: "/motion.mp4" },
+    { id: 101, sources: "assets", src: "/first.png" },
+  ]);
+  assert.deepEqual(previews.map((item) => item.type), ["image", "video", "image", "audio", "image"]);
+  assert.deepEqual(referenceTypeOrdinals(previews), [1, 1, 2, 1, 3]);
+  assert.deepEqual(previews[4], { type: "image", src: "", missing: true });
 });
 
 test("new inventory placeholders are excluded unless the user selected them or the server persisted them", () => {

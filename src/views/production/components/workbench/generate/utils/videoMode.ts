@@ -130,6 +130,45 @@ export function initialReferenceSelection(
   return restoreReferenceSelection(inventory, serverReferences);
 }
 
+export interface VideoReferencePreview {
+  type: "image" | "video" | "audio";
+  src: string;
+  missing: boolean;
+}
+
+function mediaTypeFromSource(src: string | undefined): "image" | "video" | "audio" {
+  const clean = String(src ?? "").split("?")[0].split("#")[0];
+  const ext = clean.split(".").pop()?.toLowerCase();
+  if (["mp4", "webm", "mov", "avi", "mkv"].includes(ext ?? "")) return "video";
+  if (["mp3", "wav", "ogg", "aac", "flac", "m4a"].includes(ext ?? "")) return "audio";
+  return "image";
+}
+
+export function buildResolvedReferencePreviews(
+  resolvedReferences: readonly VideoReference[],
+  inventory: readonly VideoReferenceInput[],
+): VideoReferencePreview[] {
+  const pools = new Map<string, VideoReferenceInput[]>();
+  for (const item of inventory) {
+    const key = `${item.sources}:${String(item.id)}`;
+    pools.set(key, [...(pools.get(key) ?? []), item]);
+  }
+  return resolvedReferences.map((reference) => {
+    const item = pools.get(`${reference.sources}:${reference.id}`)?.shift();
+    const src = item?.src ?? "";
+    return {
+      type: reference.fileType ?? item?.fileType ?? mediaTypeFromSource(src),
+      src,
+      missing: !src,
+    };
+  });
+}
+
+export function referenceTypeOrdinals(references: readonly Pick<VideoReferencePreview, "type">[]): number[] {
+  const counts = { image: 0, video: 0, audio: 0 };
+  return references.map((reference) => ++counts[reference.type]);
+}
+
 export function referencesNeedReview(prompt: unknown, promptReferenceRevision: unknown, selectionRevision: unknown): boolean {
   if (typeof prompt !== "string" || !prompt.trim()) return false;
   const promptRevision = Number(promptReferenceRevision);
