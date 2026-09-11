@@ -97,3 +97,28 @@ export function createPromptDraftController(options: {
   function dispose() { for (const key of timers.keys()) clearTimer(key); }
   return { seed, edit, save, mutate, resolveConflict, dirty, hasUnsaved, dispose };
 }
+
+type DraftControllerOptions = Parameters<typeof createPromptDraftController>[0];
+type DraftSession = { states: Record<string, PromptDraft>; controller: ReturnType<typeof createPromptDraftController> };
+const promptDraftSessions = new Map<number, DraftSession>();
+/** Page-memory only: no credentials or prompt contents are written to browser storage. */
+export function getPromptDraftSession(userId: number, options: Omit<DraftControllerOptions, "states"> & {
+  currentUserId: () => number | undefined;
+  createStates?: () => Record<string, PromptDraft>;
+}): DraftSession {
+  const validUser = Number.isSafeInteger(userId) && userId > 0;
+  const cached = validUser ? promptDraftSessions.get(userId) : undefined;
+  if (cached) return cached;
+  const states = options.createStates?.() ?? {};
+  function requireSameUser() {
+    if (!validUser || options.currentUserId() !== userId) throw Object.assign(new Error("登录用户已变化，草稿已按原用户保留；重新打开提示词管理后再保存。"), { status: 401 });
+  }
+  const controller = createPromptDraftController({
+    ...options, states,
+    write: async (operation, input) => { requireSameUser(); return options.write(operation, input); },
+    read: async key => { requireSameUser(); return options.read(key); },
+  });
+  const session = { states, controller };
+  if (validUser) promptDraftSessions.set(userId, session);
+  return session;
+}

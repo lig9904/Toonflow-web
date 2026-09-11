@@ -72,3 +72,30 @@ test("debounce coalesces rapid edits into a single save", async () => {
   try { controller.seed([entry("a")]); controller.edit("a", "one"); controller.edit("a", "two"); await new Promise(resolve => setTimeout(resolve, 45)); assert.equal(writes.length, 1); assert.equal(writes[0].content, "two"); }
   finally { controller.dispose(); }
 });
+
+test("closing during save failure and reopening retains draft, expected version and the same idempotency request", async () => {
+  const { getPromptDraftSession } = await import("../src/components/setting/components/promptDraftController.ts");
+  const waiting = deferred<PromptEntry>(); const writes: PromptMutationInput[] = [];
+  const options = { currentUserId: () => 701, delay: 100000, makeId: () => "close-reopen-request", read: async (key: string) => entry(key), write: async (_operation: string, input: PromptMutationInput) => { writes.push({ ...input }); if (writes.length === 1) return waiting.promise; return entry(input.key, input.content, "v2"); } };
+  const original = getPromptDraftSession(701, options); original.controller.seed([entry("a")]); original.controller.edit("a", "must survive close");
+  const saving = original.controller.save("a"); original.controller.dispose(); waiting.reject(new Error("failed after unmount")); await saving;
+  const reopened = getPromptDraftSession(701, options);
+  try {
+    assert.equal(reopened.controller, original.controller); assert.equal(reopened.states.a.draft, "must survive close"); assert.equal(reopened.states.a.entry.version, "v1"); assert.equal(reopened.states.a.status, "error");
+    reopened.controller.seed([entry("a", "fresh server", "v9")]); assert.equal(reopened.states.a.draft, "must survive close");
+    await reopened.controller.save("a"); assert.deepEqual(writes[1], writes[0]); assert.equal(reopened.states.a.status, "saved");
+  } finally { reopened.controller.dispose(); }
+});
+
+test("page draft caches are isolated by user and delayed writes cannot run as another user", async () => {
+  const { getPromptDraftSession } = await import("../src/components/setting/components/promptDraftController.ts");
+  let currentUserId = 801; let writes = 0;
+  const options = { currentUserId: () => currentUserId, delay: 100000, makeId: () => "user-isolation-request", read: async (key: string) => entry(key), write: async (_operation: string, input: PromptMutationInput) => { writes++; return entry(input.key, input.content, "v2"); } };
+  const first = getPromptDraftSession(801, options); first.controller.seed([entry("a")]); first.controller.edit("a", "first user's draft");
+  currentUserId = 802; const second = getPromptDraftSession(802, options); second.controller.seed([entry("a")]);
+  try {
+    assert.notEqual(first.controller, second.controller); assert.equal(second.states.a.draft, "default");
+    await first.controller.save("a"); assert.equal(writes, 0); assert.equal(first.states.a.draft, "first user's draft");
+    currentUserId = 801; await first.controller.save("a"); assert.equal(writes, 1);
+  } finally { first.controller.dispose(); second.controller.dispose(); }
+});

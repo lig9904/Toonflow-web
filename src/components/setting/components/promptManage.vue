@@ -1,5 +1,5 @@
 <template>
-  <div class="prompt-management">
+  <div v-if="sameSessionUser" class="prompt-management">
     <header class="page-heading">
       <div><h3>提示词管理</h3><p>共 {{ entries.length }} 项。编辑后自动保存，新版本对下一次运行生效。</p></div>
       <button class="secondary" :disabled="loading" @click="loadPrompts">{{ loading ? '读取中…' : '刷新列表' }}</button>
@@ -99,10 +99,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import axios from "@/utils/axios";
-import { createPromptDraftController, type PromptEntry, type PromptDraft } from "./promptDraftController";
+import userStore from "@/stores/user";
+import { getPromptDraftSession, type PromptEntry, type PromptDraft } from "./promptDraftController";
 interface HistoryItem { version: string; content: string; actor: string; operation: string; createdAt: string }
 interface Preview { reviewSystem?: string; visualManual?: string; versions?: Array<{key: string; version: string}>; context?: { actualMode: string; model: string; scriptDuration: number; generation: { duration: number; resolution: string; audio: boolean } }; previewKind: string; content?: string; system?: string; note?: string; notice?: string; parts?: Array<{ key: string; version: string; content: string }>; runtimeContextRequired?: string[] }
-const states = reactive<Record<string, PromptDraft>>({});
+const account = userStore();
+const sessionUserId = Number(account.user?.id);
+const sameSessionUser = computed(() => Number(account.user?.id) === sessionUserId && sessionUserId > 0);
+const { states, controller } = getPromptDraftSession(sessionUserId, {
+  currentUserId: () => account.user?.id,
+  createStates: () => reactive<Record<string, PromptDraft>>({}),
+  write: async (operation, input) => (await axios.post(`/setting/promptManage/${operation}`, input)).data as PromptEntry,
+  read: async key => (await axios.post("/setting/promptManage/promptDetail", { key })).data as PromptEntry,
+});
 const selectedKey = ref("");
 const search = ref("");
 const groupFilter = ref("all");
@@ -175,11 +184,7 @@ async function compilePreview() {
 let panelSequence = 0;
 let disposed = false;
 const groups = [{ key: "all", label: "全部" }, { key: "common", label: "通用" }, { key: "video", label: "视频模式" }, { key: "skill", label: "内置 Skill" }, { key: "review", label: "核验" }];
-const controller = createPromptDraftController({
-  states,
-  write: async (operation, input) => (await axios.post(`/setting/promptManage/${operation}`, input)).data as PromptEntry,
-  read: async key => (await axios.post("/setting/promptManage/promptDetail", { key })).data as PromptEntry,
-});
+
 const entries = computed(() => Object.values(states).map(s => s.entry));
 const current = computed(() => states[selectedKey.value]);
 const visibleGroups = computed(() => groups.filter(g => g.key !== "all" && (groupFilter.value === "all" || g.key === groupFilter.value)).map(group => ({ ...group, items: entries.value.filter(entry => entry.group === group.key && `${entry.key} ${entry.name} ${entry.usedBy.join(' ')} ${entry.source}`.toLowerCase().includes(search.value.trim().toLowerCase())) })).filter(g => g.items.length));
@@ -192,8 +197,14 @@ function historyOperation(value: string) { return ({ snapshot: "修改前快照"
 function selectPrompt(key: string) { selectedKey.value = key; panel.value = ""; panelSequence++; panelLoading.value = false; }
 function editContent(event: Event) { controller.edit(selectedKey.value, (event.target as HTMLTextAreaElement).value); }
 async function loadPrompts() {
-  if (loading.value) return; loading.value = true; loadError.value = "";
-  try { const response = await axios.post("/setting/promptManage/listPrompts"); controller.seed(response.data as PromptEntry[]); if (!selectedKey.value) selectedKey.value = entries.value[0]?.key || ""; }
+  if (loading.value || !sameSessionUser.value) return; loading.value = true; loadError.value = "";
+  const versionsAtRead = new Map(Object.entries(states).map(([key, state]) => [key, state.entry.version]));
+  try {
+    const response = await axios.post("/setting/promptManage/listPrompts");
+    if (disposed || !sameSessionUser.value) return;
+    controller.seed((response.data as PromptEntry[]).filter(entry => !states[entry.key] || states[entry.key].entry.version === versionsAtRead.get(entry.key)));
+    if (!selectedKey.value) selectedKey.value = entries.value[0]?.key || "";
+  }
   catch (error) { loadError.value = (error as Error)?.message || "读取提示词失败，请重试。"; }
   finally { loading.value = false; }
 }
