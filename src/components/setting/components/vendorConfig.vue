@@ -108,7 +108,7 @@
             </div>
             <div class="tags">
               <t-tag theme="primary">{{ $t(getTypeLabel(item.type)) }}</t-tag>
-              <t-tag v-if="item.type === 'text' && (item as any).think" variant="light">{{ $t("settings.vendor.think") }}</t-tag>
+              <t-tag v-if="item.type === 'text' && ((item as any).think || (item as any).thinkingMode === 'required')" variant="light">{{ (item as any).thinkingMode === 'required' ? '始终思考' : $t("settings.vendor.think") }}</t-tag>
               <template v-for="(mode, mIdx) in (item as any).mode" :key="mIdx">
                 <t-tag v-if="!Array.isArray(mode)" variant="light">{{ getModeLabel(mode, item.type) }}</t-tag>
                 <t-tag v-else variant="light" v-for="(m, mmIdx) in mode" :key="mmIdx">
@@ -153,8 +153,9 @@
             <t-form-item name="think" :label="$t('settings.vendor.think')">
               <t-radio-group v-model="modelFormData.think">
                 <t-radio :value="true">{{ $t("settings.vendor.supported") }}</t-radio>
-                <t-radio :value="false">{{ $t("settings.vendor.notSupported") }}</t-radio>
+                <t-radio :value="false" :disabled="modelThinkingRequired">{{ $t("settings.vendor.notSupported") }}</t-radio>
               </t-radio-group>
+              <p v-if="modelThinkingRequired" class="thinking-required-note">此型号始终思考，不支持关闭。未选择思考档位时使用最低可用强度。</p>
             </t-form-item>
           </template>
 
@@ -350,6 +351,7 @@ import settingStore from "@/stores/setting";
 import { resolveThemeMode } from "@/utils/theme";
 import { createVendorSaveQueue } from "@/utils/vendorSaveQueue";
 import TextModelTest from "./vendorTest/TextModelTest.vue";
+import { requiresThinking, updateTextModel } from "@/utils/textModelCapabilities";
 import ImageModelTest from "./vendorTest/ImageModelTest.vue";
 import VideoModelTest from "./vendorTest/VideoModelTest.vue";
 const { themeSetting } = storeToRefs(settingStore());
@@ -360,6 +362,8 @@ interface TextModel {
   modelName: string;
   type: "text";
   think: boolean;
+  thinkingMode?: "required" | "optional";
+  [key: string]: unknown;
 }
 
 interface ImageModel {
@@ -765,6 +769,10 @@ const modelFormData = ref({
   durationResolutionMap: [{ duration: [] as string[], resolution: [] as string[] }] as DrmRow[],
 });
 
+const knownTextModel = computed(() => (currentVendor.value?.models ?? currentVendor.value?.model ?? []).find((item): item is TextModel => item.type === "text" && item.modelName === modelFormData.value.modelName.trim()));
+const modelThinkingRequired = computed(() => modelFormData.value.type === "text" && requiresThinking(knownTextModel.value));
+watch(modelThinkingRequired, (required) => { if (required) modelFormData.value.think = true; });
+
 function resetModelForm(type: "text" | "image" | "video" = "text") {
   modelFormData.value = {
     name: "",
@@ -800,12 +808,7 @@ function buildModelFromForm(): VendorModel | null {
   }
 
   if (modelFormData.value.type === "text") {
-    return {
-      name,
-      modelName,
-      type: "text",
-      think: modelFormData.value.think,
-    };
+    return updateTextModel(knownTextModel.value, { name, modelName, think: modelFormData.value.think });
   }
 
   if (modelFormData.value.type === "image") {
@@ -930,7 +933,7 @@ function handleEditModel(model: VendorModel) {
       name: model.name,
       modelName: model.modelName,
       type: "text",
-      think: model.think,
+      think: requiresThinking(model) ? true : model.think,
       mode: [],
       mixedMode: [],
       mixedModeCount: {},
@@ -1261,6 +1264,7 @@ function handleFileChange(e: Event) {
 </script>
 
 <style lang="scss" scoped>
+.thinking-required-note { color: var(--td-text-color-secondary); font-size: 12px; margin: 6px 0 0; line-height: 1.6; }
 .modelServe {
   width: 100%;
   height: 100%;

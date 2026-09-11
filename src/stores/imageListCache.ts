@@ -16,6 +16,7 @@ type CacheKey = string | number;
 type CachedUploadItem = Omit<UploadItem, "src"> & { src?: string };
 
 type ImageListCacheData = Record<CacheKey, Record<CacheKey, Record<CacheKey, CachedUploadItem[]>>>;
+type UserSelectionData = Record<CacheKey, Record<CacheKey, Record<CacheKey, boolean>>>;
 
 /** 用于向后端请求 URL 的标识信息 */
 interface ResolveUrlItem {
@@ -54,6 +55,7 @@ export default defineStore(
   "imageListCache",
   () => {
     const cacheData = ref<ImageListCacheData>({});
+    const userSelectionData = ref<UserSelectionData>({});
 
     /** URL 解析缓存: "id:sources" -> 后端返回的完整 URL，避免重复请求 */
     const urlMap = ref<Record<string, string>>({});
@@ -171,7 +173,7 @@ export default defineStore(
      * 设置缓存（自动提取 src 路径部分）
      * 同时将完整 URL 写入 urlMap，避免新增图片后裂图
      */
-    function setCache(projectId: CacheKey, scriptId: CacheKey, trackId: CacheKey, imageList: (UploadItem | TrackMedia)[]): void {
+    function setCache(projectId: CacheKey, scriptId: CacheKey, trackId: CacheKey, imageList: (UploadItem | TrackMedia)[], options?: { userEdited?: boolean }): void {
       if (!cacheData.value[projectId]) {
         cacheData.value[projectId] = {};
       }
@@ -192,6 +194,15 @@ export default defineStore(
         urlMap.value = { ...urlMap.value };
       }
       cacheData.value[projectId][scriptId][trackId] = toCachedItems(imageList);
+      if (options?.userEdited) {
+        if (!userSelectionData.value[projectId]) userSelectionData.value[projectId] = {};
+        if (!userSelectionData.value[projectId][scriptId]) userSelectionData.value[projectId][scriptId] = {};
+        userSelectionData.value[projectId][scriptId][trackId] = true;
+      }
+    }
+
+    function hasUserSelection(projectId: CacheKey, scriptId: CacheKey, trackId: CacheKey): boolean {
+      return userSelectionData.value[projectId]?.[scriptId]?.[trackId] === true;
     }
 
     /**
@@ -200,6 +211,7 @@ export default defineStore(
     function removeCache(projectId: CacheKey, scriptId: CacheKey, trackId: CacheKey): void {
       if (cacheData.value[projectId]?.[scriptId]) {
         delete cacheData.value[projectId][scriptId][trackId];
+        if (userSelectionData.value[projectId]?.[scriptId]) delete userSelectionData.value[projectId][scriptId][trackId];
       }
     }
 
@@ -224,11 +236,13 @@ export default defineStore(
       if (cacheData.value[projectId]) {
         delete cacheData.value[projectId][scriptId];
       }
+      if (userSelectionData.value[projectId]) delete userSelectionData.value[projectId][scriptId];
     }
     function clearProjectCache(projectId: CacheKey): void {
       if (cacheData.value && cacheData.value?.[projectId]) {
         delete cacheData.value[projectId];
       }
+      if (userSelectionData.value?.[projectId]) delete userSelectionData.value[projectId];
     }
     /**
      * 从后端返回的 trackList 批量初始化缓存
@@ -253,6 +267,7 @@ export default defineStore(
       }
       if (!cacheData.value[projectId]) cacheData.value[projectId] = {};
       cacheData.value[projectId][scriptId] = {};
+      if (userSelectionData.value[projectId]) delete userSelectionData.value[projectId][scriptId];
       trackList.forEach((track) => {
         if (track.id == null) return;
         cacheData.value[projectId][scriptId][track.id] = toCachedItems(track.medias);
@@ -290,11 +305,13 @@ export default defineStore(
 
     return {
       cacheData,
+      userSelectionData,
       urlMap,
       getCache,
       getCacheWithResolve,
       getRawCache,
       setCache,
+      hasUserSelection,
       removeCache,
       removeImageById,
       clearScriptCache,
@@ -307,5 +324,5 @@ export default defineStore(
       clearProjectCache,
     };
   },
-  { persist: { pick: ["cacheData"] } },
+  { persist: { pick: ["cacheData", "userSelectionData"] } },
 );

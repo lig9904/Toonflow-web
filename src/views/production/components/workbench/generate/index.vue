@@ -6,7 +6,7 @@
     </div>
     <div class="referenceImage">
       <div class="uploadBtn">
-        <imageSelect :mode="modelParmas.mode as VideoMode" v-model="imageList" :storyboard-list="storyboardList" />
+        <imageSelect :mode="currentModeIntent" v-model="imageList" :storyboard-list="storyboardList" />
         <t-button v-if="modelParmas.model.startsWith('volcengineSd2:')" size="small" variant="outline" :disabled="!scopeReady || !trustedLocalTargets.length" @click="trustedAssetsVisible = true">火山素材库</t-button>
       </div>
     </div>
@@ -22,6 +22,12 @@
         :projectId="project?.id"
         :scriptId="episodesId"
         :modeList="modeList"
+        :modeIntent="currentModeIntent"
+        :modeSaving="modeSaving"
+        :resolving="modeResolving"
+        :resolvedMode="currentTrack?.resolvedMode"
+        :referenceSummary="currentTrack?.referenceSummary"
+        :compatibility="currentTrack?.compatibility"
         @modeChange="modeChange"
         @durationUpdated="handleDurationUpdated" />
     </div>
@@ -37,6 +43,7 @@
             <div class="promptInput" @focusout="handlePromptBlur">
               <promptEditor v-model="currentTrack.prompt" :references="references" :placeholder="$t('workbench.generate.promptPlaceholder')" />
             </div>
+            <t-alert v-if="currentTrack.referencesNeedReview" theme="warning" title="参考素材已变化，已保留人工提示词，请在生成前核对素材编号与正文。" />
             <details v-if="currentTrack.promptReview && currentTrack.prompt === currentTrack.promptReviewPrompt && currentTrack.promptReviewContext === reviewContextSignature(currentTrack)" class="promptReview">
               <summary>{{ currentTrack.promptReview.status === 'passed' ? '提示词核验完成' : currentTrack.promptReview.status === 'failed' ? '提示词核验未完成' : '提示词核验提示' }}{{ currentTrack.promptReview.revised ? ' · 已作最小修正' : '' }}</summary>
               <p>{{ currentTrack.promptReview.summary }}</p>
@@ -72,6 +79,9 @@
         :scope-sequence="scopeSequence"
         :prompt-generation-gate="promptGenerationGate"
         :prepare-prompt-generation="preparePromptGeneration"
+        :prepare-reference-selection="prepareReferenceSelection"
+        :references-for-track="referencesForTrack"
+        :review-context-for-generation="reviewContextForGeneration"
         @getData="getGenerateData" />
     </div>
   </div>
@@ -96,12 +106,26 @@ import imageListCacheStore from "@/stores/imageListCache";
 import { createGenerationIntentStore } from "@/utils/generationIntent";
 import { createIdempotencyKey } from "@/utils/idempotency";
 import { captureGenerateScope, positiveId, sameGenerateScope, type GenerateScope, type PromptGenerationIntent } from "./utils/scope";
+import {
+  buildVideoReferences,
+  captureVideoGenerationSettings,
+  modeIntentForTrack,
+  modeIntentSelectValue,
+  parseModeIntentValue,
+  referenceSignature,
+  referencesNeedReview as shouldReviewReferences,
+  initialReferenceSelection,
+  restoreReferenceSelection,
+  videoModeLabel,
+  type VideoModeIntent,
+  type VideoReference,
+} from "./utils/videoMode";
 
 const { project } = storeToRefs(projectStore());
 const episodesId = inject<Ref<number>>("episodesId")!;
 const activeTrackIndex = ref(0);
 const cacheStore = imageListCacheStore();
-const generationIntents = createGenerationIntentStore<{ videoId: number; promptReview?: VideoPromptReview | null }>();
+const generationIntents = createGenerationIntentStore<{ videoId: number; promptReview?: VideoPromptReview | null; modeResolution?: VideoModeResolutionView }>();
 const generateVideoPending = ref(false);
 const promptMutationIntents = new Map<number, { signature: string; key: string }>();
 const promptSavePromises = new Map<number, { signature: string; promise: Promise<boolean> }>();
@@ -109,8 +133,16 @@ const promptGenerationIntents = new Map<number, PromptGenerationIntent>();
 const promptPending = reactive(new Map<number, { previousJobId?: string; jobId?: string; submitted: boolean }>());
 const persistedTrackPrompts = new Map<number, string>();
 const promptConflictVersions = new Map<number, number>();
+const modeMutationIntents = new Map<number, { signature: string; key: string }>();
+const referenceMutationIntents = new Map<number, { signature: string; key: string }>();
+const referenceSavePromises = new Map<number, { signature: string; promise: Promise<boolean> }>();
+const persistedReferenceSignatures = new Map<number, string>();
+const selectionMutationQueues = new Map<number, Promise<unknown>>();
+const modeSaving = ref(false);
+const modeResolving = ref(false);
+let modeResolveSequence = 0;
 const durationOverrides = useLocalStorage<Record<string, number>>(`toonflow:video-duration-overrides:${userStore().user?.id}:${project.value?.id}:${episodesId.value}`, {});
-const { getCache, setCache, removeCache, initCacheFromTrackList, warmUpUrls } = cacheStore;
+const { getCache, setCache, removeCache, initCacheFromTrackList, warmUpUrls, hasUserSelection } = cacheStore;
 const { urlMap } = storeToRefs(cacheStore);
 
 const modeOptions = ref<VideoModel>({
@@ -165,14 +197,20 @@ const imageList = computed({
   },
   set(val: UploadItem[]) {
     if (currentTrack.value) {
+      const track = currentTrack.value;
+      const before = referenceSignature(buildVideoReferences(track.medias as UploadItem[], modeIntentFor(track)));
+      const after = referenceSignature(buildVideoReferences(val, modeIntentFor(track)));
+      if (before !== after && track.prompt) track.referencesNeedReview = true;
       currentTrack.value.medias = val as any;
       // 同步写入缓存
       const pid = project.value?.id;
       const sid = episodesId.value;
       const trackId = currentTrack.value.id;
       if (pid != null && sid != null && trackId != null) {
-        setCache(pid, sid, trackId, val);
+        setCache(pid, sid, trackId, val, { userEdited: true });
       }
+      const scope = currentScope.value;
+      if (scope) void saveTrackReferences(track, scope);
     }
   },
 });
@@ -195,40 +233,135 @@ function orderReferenceItems(items: UploadItem[]): UploadItem[] {
   return [...items];
 }
 
-function promptReferenceInfo(track: TrackItem, requireSrc = false): Array<{ id: number; sources: "storyboard" | "assets"; fileType?: "image" | "video" | "audio" }> {
-  if (modelParmas.value.mode === "text") return [];
+function modeIntentFor(track: TrackItem): VideoModeIntent {
+  return modeIntentForTrack(track);
+}
+
+function referencesForTrack(track: TrackItem, requireSrc = false): VideoReference[] {
   const active = positiveId(currentTrack.value?.id) === positiveId(track.id);
   const raw = (active ? imageList.value : track.medias) as UploadItem[];
-  const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
-  const sliced = frameMode.includes(modelParmas.value.mode) ? raw.slice(0, 2) : modelParmas.value.mode === "singleImage" ? raw.slice(0, 1) : raw;
-  return sliced.filter((item) => (!requireSrc || Boolean(item.src)) && positiveId(item.id) != null && (item.sources === "storyboard" || item.sources === "assets"))
-    .map((item) => ({ id: positiveId(item.id)!, sources: item.sources as "storyboard" | "assets", fileType: item.fileType }));
+  return buildVideoReferences(raw, modeIntentFor(track), requireSrc);
+}
+
+function enqueueSelectionMutation<T>(trackId: number, task: () => Promise<T>): Promise<T> {
+  const previous = selectionMutationQueues.get(trackId) ?? Promise.resolve();
+  const running = previous.catch(() => undefined).then(task);
+  const marker = running.then(() => undefined, () => undefined);
+  selectionMutationQueues.set(trackId, marker);
+  void marker.finally(() => { if (selectionMutationQueues.get(trackId) === marker) selectionMutationQueues.delete(trackId); });
+  return running;
+}
+
+function saveTrackReferences(track: TrackItem, scope: GenerateScope): Promise<boolean> {
+  const trackId = positiveId(track.id);
+  if (trackId == null || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return Promise.resolve(false);
+  const references = referencesForTrack(track);
+  const signature = referenceSignature(references);
+  if (track.referencesInitialized && persistedReferenceSignatures.get(trackId) === signature) return Promise.resolve(true);
+  const existing = referenceSavePromises.get(trackId);
+  if (existing?.signature === signature) return existing.promise;
+  const promise = enqueueSelectionMutation(trackId, async () => {
+    if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
+    const expectedRevision = Number(track.modeIntentRevision ?? 0);
+    const payload = { projectId: scope.projectId, scriptId: scope.scriptId, trackId, references, expectedRevision };
+    const mutationSignature = JSON.stringify(payload);
+    const previous = referenceMutationIntents.get(trackId);
+    const intent = previous?.signature === mutationSignature ? previous : { signature: mutationSignature, key: createIdempotencyKey("video-references") };
+    referenceMutationIntents.set(trackId, intent);
+    try {
+      const raw: any = await axios.post("/production/workbench/setVideoReferences", { ...payload, idempotencyKey: intent.key });
+      const response = raw?.data ?? raw;
+      if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
+      track.modeIntent = response.modeIntent ?? track.modeIntent;
+      track.modeIntentRevision = Number.isSafeInteger(Number(response.revision)) ? Number(response.revision) : expectedRevision;
+      const persistedReferences = response.references ?? references;
+      track.references = persistedReferences;
+      track.referencesInitialized = true;
+      track.medias = restoreReferenceSelection(track.medias, persistedReferences) as TrackMedia[];
+      setCache(scope.projectId, scope.scriptId, trackId, track.medias);
+      persistedReferenceSignatures.set(trackId, referenceSignature(persistedReferences));
+      track.referencesNeedReview = track.referencesNeedReview || shouldReviewReferences(track.prompt, track.promptReferenceRevision, track.modeIntentRevision);
+      referenceMutationIntents.delete(trackId);
+      return true;
+    } catch (error: any) {
+      if (Number(error?.status) < 500) referenceMutationIntents.delete(trackId);
+      window.$message.error(error?.message ?? "参考素材保存失败");
+      return false;
+    }
+  });
+  referenceSavePromises.set(trackId, { signature, promise });
+  void promise.finally(() => { if (referenceSavePromises.get(trackId)?.promise === promise) referenceSavePromises.delete(trackId); });
+  return promise;
 }
 
 function reviewInputForTrack(track: TrackItem) {
+  if (track.promptGenerationContext) return track.promptGenerationContext;
   const active = positiveId(currentTrack.value?.id) === positiveId(track.id);
   const duration = active ? modelParmas.value.duration : (resolveDuration(sourceDurationForTrack(track)).duration ?? sourceDurationForTrack(track));
-  return { trackId: track.id, model: modelParmas.value.model, mode: modelParmas.value.mode, generation: { duration, resolution: modelParmas.value.resolution, audio: Boolean(modelParmas.value.audio) }, info: promptReferenceInfo(track, true) };
+  return { trackId: track.id, model: modelParmas.value.model, modeIntentRevision: track.modeIntentRevision ?? 0, resolvedMode: track.resolvedMode, generation: { duration, resolution: modelParmas.value.resolution, audio: Boolean(modelParmas.value.audio) }, references: referencesForTrack(track) };
+}
+function applyModeResolution(track: TrackItem, resolution: VideoModeResolutionView | null | undefined) {
+  if (!resolution) return;
+  track.modeResolution = resolution;
+  track.modeIntent = resolution.modeIntent ?? track.modeIntent;
+  track.modeIntentRevision = Number(resolution.modeIntentRevision ?? track.modeIntentRevision ?? 0);
+  track.resolvedMode = resolution.resolvedMode ?? undefined;
+  track.resolvedReferences = resolution.resolvedReferences ?? [];
+  track.referenceSummary = resolution.referenceSummary ?? undefined;
+  track.compatibility = resolution.compatibility;
 }
 function reviewContextSignature(track: TrackItem): string { return JSON.stringify(reviewInputForTrack(track)); }
+function reviewContextForGeneration(track: TrackItem, input: {
+  model: string;
+  modeIntentRevision: number;
+  references: VideoReference[];
+  generation: { duration: number; resolution: string; audio: boolean };
+}): string {
+  return JSON.stringify({ trackId: track.id, model: input.model, modeIntentRevision: input.modeIntentRevision, resolvedMode: track.resolvedMode, generation: input.generation, references: input.references });
+}
 
-function modeChange(newVal: string) {
-  if (newVal == modelParmas.value.mode) return;
-  if ((imageList.value.length || currentTrack.value?.prompt) && modelParmas.value.mode) {
-    const dialog = DialogPlugin.confirm({
-      header: $t("workbench.generate.modeChange"),
-      body: $t("workbench.generate.modeChangeConfirm"),
-      confirmBtn: $t("settings.generate.modelChnageSure"),
-      cancelBtn: $t("settings.memory.msg.cancel"),
-      onConfirm: async () => {
-        imageList.value = [];
-        currentTrack.value.prompt = "";
-        dialog.destroy();
-        modelParmas.value.mode = newVal;
-      },
+async function modeChange(newVal: string) {
+  const scope = currentScope.value;
+  const track = currentTrack.value;
+  const trackId = positiveId(track?.id);
+  if (!scope || !track || trackId == null || modeSaving.value) return;
+  const next = parseModeIntentValue(newVal);
+  if (modeIntentSelectValue(next) === modeIntentSelectValue(modeIntentFor(track))) return;
+  modeSaving.value = true;
+  try {
+    const referencesSaved = await saveTrackReferences(track, scope);
+    if (!referencesSaved) return;
+    const mutation = await enqueueSelectionMutation(trackId, async () => {
+      const expectedRevision = Number(track.modeIntentRevision ?? 0);
+      const payload = { projectId: scope.projectId, scriptId: scope.scriptId, trackId, modeIntent: next, expectedRevision };
+      const signature = JSON.stringify(payload);
+      const previous = modeMutationIntents.get(trackId);
+      const intent = previous?.signature === signature ? previous : { signature, key: createIdempotencyKey("video-mode") };
+      modeMutationIntents.set(trackId, intent);
+      const rawResponse: any = await axios.post("/production/workbench/setVideoModeIntent", { ...payload, idempotencyKey: intent.key });
+      return { rawResponse, expectedRevision };
     });
-  } else if (newVal) {
-    modelParmas.value.mode = newVal;
+    const { rawResponse, expectedRevision } = mutation;
+    const response = rawResponse?.data ?? rawResponse;
+    if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+    track.modeIntent = response.modeIntent ?? next;
+    track.modeIntentRevision = Number.isSafeInteger(Number(response.revision)) ? Number(response.revision) : expectedRevision;
+    if (Array.isArray(response.references)) {
+      track.references = response.references;
+      track.referencesInitialized = true;
+      track.medias = restoreReferenceSelection(track.medias, response.references) as TrackMedia[];
+      setCache(scope.projectId, scope.scriptId, trackId, track.medias);
+      persistedReferenceSignatures.set(trackId, referenceSignature(response.references));
+    }
+    if (track.prompt) track.referencesNeedReview = true;
+    if (currentTrack.value === track) modelParmas.value.mode = modeIntentSelectValue(track.modeIntent);
+    modeMutationIntents.delete(trackId);
+    if (currentTrack.value === track) await resolveCurrentVideoMode();
+  } catch (error: any) {
+    window.$message.error(error?.message ?? "视频模式保存失败");
+    if (Number(error?.status) < 500) modeMutationIntents.delete(trackId);
+  } finally {
+    modeSaving.value = false;
   }
 }
 const modeList = computed(() => {
@@ -251,13 +384,18 @@ const modeList = computed(() => {
     }
     return modeLabelMap[m] || m;
   }
-  return modeOptions.value.mode
+  const choices = modeOptions.value.mode
     ? modeOptions.value.mode.map((mode) =>
         Array.isArray(mode)
           ? { value: JSON.stringify(mode), label: mode.map((m) => parseRefLabel(m)).join(" + ") + "参考" }
           : { value: mode, label: modeLabelMap[mode] || mode },
       )
     : [];
+  const currentValue = modeIntentSelectValue(currentModeIntent.value);
+  if (currentValue !== "auto" && !choices.some((choice) => choice.value === currentValue)) {
+    choices.unshift({ value: currentValue, label: `${videoModeLabel(currentModeIntent.value)}（当前人工选择）` });
+  }
+  return [{ value: "auto", label: "自动匹配" }, ...choices];
 });
 const currentTrack = computed({
   get() {
@@ -267,6 +405,56 @@ const currentTrack = computed({
     trackList.value[activeTrackIndex.value] = val;
   },
 });
+const currentModeIntent = computed<VideoModeIntent>(() => currentTrack.value ? modeIntentFor(currentTrack.value) : "auto");
+
+async function resolveCurrentVideoMode() {
+  const scope = currentScope.value;
+  const track = currentTrack.value;
+  const trackId = positiveId(track?.id);
+  if (!scope || !scopeReady.value || !track || trackId == null || !modelParmas.value.model) return;
+  if (!(await saveTrackReferences(track, scope))) return;
+  if (currentTrack.value !== track || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+  const references = referencesForTrack(track);
+  const requestSignature = JSON.stringify({
+    projectId: scope.projectId,
+    scriptId: scope.scriptId,
+    trackId,
+    model: modelParmas.value.model,
+    references,
+    modeIntentRevision: track.modeIntentRevision ?? 0,
+  });
+  const sequence = ++modeResolveSequence;
+  modeResolving.value = true;
+  try {
+    const raw: any = await axios.post("/production/workbench/resolveVideoMode", JSON.parse(requestSignature));
+    const response = raw?.data ?? raw;
+    if (sequence !== modeResolveSequence || currentTrack.value !== track || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+    track.modeIntent = response.modeIntent ?? track.modeIntent;
+    track.modeIntentRevision = Number(response.modeIntentRevision ?? track.modeIntentRevision ?? 0);
+    const previousResolved = track.resolvedReferences ? referenceSignature(track.resolvedReferences) : undefined;
+    const nextResolved = response.resolvedReferences ?? [];
+    applyModeResolution(track, response);
+    if (previousResolved != null && previousResolved !== referenceSignature(nextResolved) && track.prompt) track.referencesNeedReview = true;
+    track.referenceSummary = response.referenceSummary;
+    track.compatibility = response.compatibility ?? { ok: true };
+  } catch (error: any) {
+    if (sequence !== modeResolveSequence || currentTrack.value !== track || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+    track.resolvedMode = undefined;
+    track.resolvedReferences = undefined;
+    track.referenceSummary = undefined;
+    track.compatibility = { ok: false, code: error?.code, message: error?.message ?? "当前模型与所选模式或素材不兼容" };
+  } finally {
+    if (sequence === modeResolveSequence) modeResolving.value = false;
+  }
+}
+
+watch(
+  () => {
+    const track = currentTrack.value;
+    return track ? JSON.stringify({ id: track.id, model: modelParmas.value.model, revision: track.modeIntentRevision, references: referencesForTrack(track) }) : "";
+  },
+  () => { void resolveCurrentVideoMode(); },
+);
 
 const promptGenerationGate = {
   begin(ids: readonly number[], previousJobIds: ReadonlyMap<number, string | null> = new Map()): boolean {
@@ -319,6 +507,10 @@ watch(
     promptMutationIntents.clear();
     promptSavePromises.clear();
     promptGenerationGate.clear();
+    persistedReferenceSignatures.clear();
+    referenceMutationIntents.clear();
+    referenceSavePromises.clear();
+    selectionMutationQueues.clear();
     const nextScope = captureGenerateScope(project.value?.id, episodesId.value, scopeSequence.value);
     if (nextScope && !disposed.value) void getGenerateData();
   },
@@ -387,7 +579,6 @@ watch(
         type: "video",
         mode: [],
       };
-      modelParmas.value.mode = "";
       return;
     }
     axios.post("/modelSelect/getModelDetail", { modelId: val }).then(({ data }) => {
@@ -403,33 +594,13 @@ watch(
         if (!resolutions.includes(modelParmas.value.resolution)) modelParmas.value.resolution = resolutions[0] ?? "";
       }
 
-      const currentParsed = parseMode(modelParmas.value.mode);
-      const modeMatched =
-        currentParsed !== null &&
-        data.mode.some((m: VideoMode) => {
-          if (Array.isArray(m) && Array.isArray(currentParsed)) {
-            return JSON.stringify(m) === JSON.stringify(currentParsed);
-          }
-          return m == currentParsed;
-        });
-      if (!modeMatched) {
-        const newMode = Array.isArray(data.mode[0]) ? JSON.stringify(data.mode[0]) : data.mode[0];
-        modeChange(newMode);
-      }
+      // Keep an explicit per-track intent even when this model cannot satisfy
+      // it. resolveVideoMode supplies the actionable incompatibility message.
+      void resolveCurrentVideoMode();
     });
   },
   { immediate: true },
 );
-function parseMode(value: string): VideoMode | null {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(value);
-    if (Array.isArray(parsed)) return parsed as ReferenceType[];
-  } catch {
-    return value as Exclude<VideoMode, ReferenceType[]>;
-  }
-  return value as Exclude<VideoMode, ReferenceType[]>;
-}
 /** uploadBox 作为 promptEditor 的引用预览 */
 const references = computed(() => {
   function getFileTypeByExt(src: string | undefined): "image" | "video" | "audio" {
@@ -443,7 +614,10 @@ const references = computed(() => {
     return "image";
   }
 
+  const resolved = currentTrack.value?.resolvedReferences;
+  const resolvedKeys = resolved ? new Set(resolved.map((item) => `${item.sources}:${item.id}`)) : undefined;
   return imageList.value
+    .filter((item) => !resolvedKeys || resolvedKeys.has(`${item.sources}:${item.id}`))
     .filter((item) => item.src)
     .map((item) => ({
       type: getFileTypeByExt(item.src) as "image" | "video" | "audio" | "text",
@@ -475,7 +649,28 @@ async function loadGenerateData(scope: GenerateScope, requestSequence: number) {
 
   if (!Array.isArray(data?.storyboardList) || !Array.isArray(data?.trackList) || data.trackList.some((track: TrackItem) => positiveId(track.id) == null)) throw new Error("片段数据格式无效");
   const storyboardData = data.storyboardList;
-  const trackData: TrackItem[] = data.trackList.map((track: TrackItem) => ({ ...track, id: positiveId(track.id)!, promptReviewPrompt: track.prompt }));
+  const trackData: TrackItem[] = data.trackList.map((track: TrackItem) => ({
+    ...track,
+    id: positiveId(track.id)!,
+    modeIntent: modeIntentForTrack(track),
+    modeIntentRevision: Number.isSafeInteger(Number(track.modeIntentRevision)) ? Number(track.modeIntentRevision) : 0,
+    promptReviewPrompt: track.prompt,
+    referencesNeedReview: shouldReviewReferences(track.prompt, track.promptReferenceRevision, track.modeIntentRevision),
+  }));
+  trackData.forEach((track) => applyModeResolution(track, track.modeResolution));
+  // A server-initialized selection is authoritative across refreshes and
+  // collaborators. Legacy tracks may still use the local cache until their
+  // first explicit reference save migrates them.
+  trackData.forEach((track) => {
+    const trackId = positiveId(track.id);
+    if (trackId == null) return;
+    if (Array.isArray(track.references)) {
+      const userEditedCache = hasUserSelection(scope.projectId, scope.scriptId, trackId);
+      track.medias = initialReferenceSelection(track.medias, track.references, { referencesInitialized: Boolean(track.referencesInitialized), userEditedCache }) as TrackMedia[];
+      if (track.referencesInitialized || !userEditedCache) setCache(scope.projectId, scope.scriptId, trackId, track.medias);
+      if (track.referencesInitialized) persistedReferenceSignatures.set(trackId, referenceSignature(track.references));
+    }
+  });
   // 优先使用本地缓存，没有缓存则用后端数据并写入缓存
   initCacheFromTrackList(scope.projectId, scope.scriptId, trackData);
   await warmUpUrls(scope.projectId, scope.scriptId);
@@ -500,6 +695,8 @@ async function loadGenerateData(scope: GenerateScope, requestSequence: number) {
     if (trackId != null) persistedTrackPrompts.set(trackId, track.prompt ?? "");
   });
   syncCurrentDuration();
+  if (currentTrack.value) modelParmas.value.mode = modeIntentSelectValue(modeIntentFor(currentTrack.value));
+  void resolveCurrentVideoMode();
 }
 /** 提示词失焦时保存到后端 */
 function handleDurationUpdated(update: { trackId: number; version: number }) {
@@ -532,6 +729,7 @@ function saveTrackPrompt(track: TrackItem, scope: GenerateScope): Promise<boolea
     scriptId: scope.scriptId,
     prompt,
     expectedVersion: track.version,
+    modeIntentRevision: track.modeIntentRevision ?? 0,
   };
   const signature = JSON.stringify(payload);
   const existing = promptSavePromises.get(trackId);
@@ -547,6 +745,8 @@ function saveTrackPrompt(track: TrackItem, scope: GenerateScope): Promise<boolea
       if (target !== track) return false;
       if (track.version === payload.expectedVersion && Number.isSafeInteger(Number(response.version))) track.version = Number(response.version);
       persistedTrackPrompts.set(trackId, prompt);
+      track.promptReferenceRevision = track.modeIntentRevision ?? 0;
+      track.referencesNeedReview = false;
       promptConflictVersions.delete(trackId);
       promptMutationIntents.delete(trackId);
       return true;
@@ -581,7 +781,19 @@ async function preparePromptGeneration(trackIds: readonly number[], scope: Gener
     const id = positiveId(track.id);
     return id != null && trackIds.includes(id);
   });
+  const referenceResults = await Promise.all(tracks.map((track) => saveTrackReferences(track, scope)));
+  if (!referenceResults.every(Boolean)) return false;
   const results = await Promise.all(tracks.map((track) => saveTrackPrompt(track, scope)));
+  return results.length === trackIds.length && results.every(Boolean) && sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value);
+}
+
+async function prepareReferenceSelection(trackIds: readonly number[], scope: GenerateScope): Promise<boolean> {
+  if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
+  const tracks = trackList.value.filter((track) => {
+    const id = positiveId(track.id);
+    return id != null && trackIds.includes(id);
+  });
+  const results = await Promise.all(tracks.map((track) => saveTrackReferences(track, scope)));
   return results.length === trackIds.length && results.every(Boolean) && sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value);
 }
 
@@ -591,9 +803,12 @@ async function genText() {
   const track = currentTrack.value;
   const currentTrackId = positiveId(track?.id);
   if (!scope || !scopeReady.value || !track || currentTrackId == null || track.state === "生成中") return;
+  const generationSnapshot = captureVideoGenerationSettings(modelParmas.value);
+  if (!(await saveTrackReferences(track, scope))) return;
+  if (track.compatibility && !track.compatibility.ok) return window.$message.error(track.compatibility.message ?? "当前模型与所选模式或素材不兼容");
   const previousJobId = typeof track.promptJobId === "string" ? track.promptJobId : undefined;
   if (!promptGenerationGate.begin([currentTrackId], new Map([[currentTrackId, previousJobId ?? null]]))) return;
-  const info = promptReferenceInfo(track);
+  const references = referencesForTrack(track);
   const saved = await saveTrackPrompt(track, scope);
   if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
   if (!saved) {
@@ -602,7 +817,8 @@ async function genText() {
   }
   track.state = "生成中";
   track.promptJobId = null;
-  const promptPayload = { projectId: scope.projectId, scriptId: scope.scriptId, trackId: currentTrackId, info, model: modelParmas.value.model, mode: modelParmas.value.mode, generation: {duration: modelParmas.value.duration, resolution: modelParmas.value.resolution, audio: Boolean(modelParmas.value.audio)}, expectedVersion: track.version };
+  const promptPayload = { projectId: scope.projectId, scriptId: scope.scriptId, trackId: currentTrackId, references, model: generationSnapshot.model, modeIntentRevision: track.modeIntentRevision ?? 0, generation: {duration: generationSnapshot.duration, resolution: generationSnapshot.resolution, audio: generationSnapshot.audio}, expectedVersion: track.version };
+  track.promptGenerationContext = { trackId: currentTrackId, model: promptPayload.model, modeIntentRevision: promptPayload.modeIntentRevision, resolvedMode: track.resolvedMode, generation: promptPayload.generation, references };
   const promptSignature = JSON.stringify(promptPayload);
   const previousIntent = promptGenerationIntents.get(currentTrackId);
   const promptIntent = previousIntent?.signature === promptSignature ? previousIntent : { signature: promptSignature, key: createIdempotencyKey("video-prompt"), startedAt: Date.now() };
@@ -614,6 +830,7 @@ async function genText() {
     if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     const target = trackList.value.find((item) => item.id === currentTrackId);
     if (target !== track) return;
+    applyModeResolution(track, response.modeResolution ?? data?.modeResolution);
     if (data && typeof data === "object" && (data.state === "running" || data.state === "queued")) {
       promptIntent.jobId = data.jobId ?? undefined;
       promptGenerationGate.noteJob(currentTrackId, promptIntent.jobId);
@@ -624,10 +841,14 @@ async function genText() {
     track.state = "已完成";
     if (Number.isSafeInteger(response.version) && response.version >= Number(track.version ?? 0)) track.version = response.version;
     persistedTrackPrompts.set(currentTrackId, data ?? "");
+    track.promptReferenceRevision = track.modeIntentRevision ?? 0;
+    track.referencesNeedReview = false;
+    track.promptGenerationContext = undefined;
     promptGenerationGate.finish(currentTrackId);
   } catch (e) {
     if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     track.state = "生成失败";
+    track.promptGenerationContext = undefined;
     window.$message.error((e as Error)?.message ?? "提示词生成失败");
     const status = Number((e as any)?.status ?? (e as any)?.response?.status);
     promptGenerationGate.finish(currentTrackId, !(Number.isSafeInteger(status) && status < 500));
@@ -653,11 +874,10 @@ function trackChange(prevIndex?: number) {
       curTrack.medias = cached as unknown as TrackMedia[];
     }
   }
-  // imageList 是基于 currentTrack.medias 的计算属性，切换轨道后自动切换数据
-  if (modelParmas.value.mode == "singleImage" && imageList.value.length > 1) {
-    imageList.value = imageList.value.slice(0, 1);
-  }
+  // imageList follows the active track. Mode changes never discard references.
+  if (curTrack) modelParmas.value.mode = modeIntentSelectValue(modeIntentFor(curTrack));
   syncCurrentDuration();
+  void resolveCurrentVideoMode();
 }
 /** 监听当前轨道的 medias 变化，实时同步到缓存 */
 watch(
@@ -676,7 +896,7 @@ watch(
 
 onMounted(() => {
   if (!modelParmas.value.model) modelParmas.value.model = project.value?.videoModel || "";
-  if (!modelParmas.value.mode) modelParmas.value.mode = project.value?.mode || "";
+  if (!modelParmas.value.mode) modelParmas.value.mode = "auto";
   if (hasGenerateVideoIds.value && hasGenerateVideoIds.value.length) {
     startPoll();
   }
@@ -690,56 +910,55 @@ async function generateVideo() {
       dlg.destroy();
       if (generateVideoPending.value) return;
       const track = currentTrack.value;
+      const scopeSnapshot = currentScope.value;
+      if (!track || !scopeSnapshot) return;
+      const generationSnapshot = captureVideoGenerationSettings(modelParmas.value);
       const sourceDuration = currentTrackSourceDuration.value;
       const durationChoice = resolveDuration(sourceDuration);
       if (durationChoice.duration == null) {
         window.$message.warning(`当前片段脚本时长 ${sourceDuration}s 超出模型支持范围，请拆分分镜或选择支持更长时长的模型`);
         return;
       }
-      const selectedDuration = resolveDuration(modelParmas.value.duration);
-      if (selectedDuration.duration !== modelParmas.value.duration || modelParmas.value.duration < durationChoice.duration! || !supportsResolution(modelParmas.value.duration)) {
+      const selectedDuration = resolveDuration(generationSnapshot.duration);
+      if (selectedDuration.duration !== generationSnapshot.duration || generationSnapshot.duration < durationChoice.duration! || !supportsResolution(generationSnapshot.duration)) {
         window.$message.warning("当前片段的时长或清晰度不是模型支持的组合，请从顶部下拉重新选择");
         return;
       }
+      if (track.compatibility && !track.compatibility.ok) {
+        window.$message.error(track.compatibility.message ?? "当前模型与所选模式或素材不兼容");
+        return;
+      }
+      if (!(await saveTrackReferences(track, scopeSnapshot))) return;
+      if (!sameGenerateScope(scopeSnapshot, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
       const requestData = {
         projectId: project.value?.id,
         scriptId: episodesId.value,
-        uploadData:
-          modelParmas.value.mode === "text"
-            ? []
-            : (() => {
-                const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
-                const preSliced = frameMode.includes(modelParmas.value.mode)
-                  ? imageList.value.slice(0, 2)
-                  : modelParmas.value.mode === "singleImage"
-                    ? imageList.value.slice(0, 1)
-                    : imageList.value;
-                const filtered = preSliced
-                  .filter((item) => Boolean(item.src) && typeof item.id === "number" && !isNaN(item.id))
-                  .map(({ id, sources, fileType }) => ({ id, sources, fileType }));
-                if (frameMode.includes(modelParmas.value.mode)) return filtered.slice(0, 2);
-                if (modelParmas.value.mode === "singleImage") return filtered.slice(0, 1);
-                return filtered;
-              })(),
+        references: referencesForTrack(track),
         prompt: track.prompt,
-        model: modelParmas.value.model,
-        mode: modelParmas.value.mode,
-        resolution: modelParmas.value.resolution,
+        model: generationSnapshot.model,
+        modeIntentRevision: track.modeIntentRevision ?? 0,
+        resolution: generationSnapshot.resolution,
         // A manually selected supported value applies to this active track only.
-        duration: modelParmas.value.duration,
-        audio: modelParmas.value.audio,
+        duration: generationSnapshot.duration,
+        audio: generationSnapshot.audio,
         trackId: track.id,
       };
       const scope = `single:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${String(track.id)}`;
       generateVideoPending.value = true;
       try {
-        const { videoId, promptReview } = await generationIntents.run(scope, requestData, async (idempotencyKey) => {
+        const { videoId, promptReview, modeResolution } = await generationIntents.run(scope, requestData, async (idempotencyKey) => {
           const { data } = await axios.post("/production/workbench/generateVideo", { ...requestData, idempotencyKey });
-          return { videoId: data.videoId, promptReview: data.promptReview };
+          return { videoId: data.videoId, promptReview: data.promptReview, modeResolution: data.modeResolution };
         });
+        applyModeResolution(track, modeResolution);
         track.promptReview = promptReview ?? null;
         track.promptReviewPrompt = track.prompt;
-        track.promptReviewContext = reviewContextSignature(track);
+        track.promptReviewContext = reviewContextForGeneration(track, {
+          model: requestData.model,
+          modeIntentRevision: requestData.modeIntentRevision,
+          references: requestData.references,
+          generation: { duration: requestData.duration, resolution: requestData.resolution, audio: requestData.audio },
+        });
         window.$message.success($t("workbench.generate.generateStarted"));
         track.videoList.push({
           id: videoId,
@@ -835,7 +1054,7 @@ async function getTrackPromptList() {
     if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     if (Array.isArray(data)) {
       const returnedIds = new Set<number>();
-      data.forEach((item: { id: number; jobId?: string; idempotencyKey?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number; promptReview?: VideoPromptReview | null }) => {
+      data.forEach((item: { id: number; jobId?: string; idempotencyKey?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number; promptReferenceRevision?: number; promptReview?: VideoPromptReview | null }) => {
         const findData = trackList.value.find((t) => t.id == item.id);
         returnedIds.add(Number(item.id));
         if (findData) {
@@ -853,14 +1072,19 @@ async function getTrackPromptList() {
           if (pending?.submitted && item.jobId && item.idempotencyKey === submittedIntent?.key) pending.jobId = item.jobId;
           if (pending && (!pending.submitted || !pending.jobId || pending.jobId !== item.jobId)) return;
           if (item.jobId) findData.promptJobId = item.jobId;
+          const completedReviewContext = findData.promptGenerationContext ?? reviewInputForTrack(findData);
           findData.promptReview = item.promptReview ?? null;
           findData.promptReviewPrompt = item.prompt;
-          findData.promptReviewContext = item.promptReview ? reviewContextSignature(findData) : undefined;
+          findData.promptReviewContext = item.promptReview ? JSON.stringify(completedReviewContext) : undefined;
           const terminal = item.state === "已完成" || item.state === "生成失败";
           if (findData.state !== item.state) findData.state = item.state;
           if ((item.state === "已完成" || item.state === "生成中") && !localDraft && item.prompt !== findData.prompt) findData.prompt = item?.prompt ?? "";
           const remoteVersionChanged = Number.isSafeInteger(remoteVersion) && remoteVersion >= 0 && findData.version !== remoteVersion;
           if (item.prompt != null && (item.state === "已完成" || item.state === "生成失败") && !localDraft) persistedTrackPrompts.set(findId, item.prompt);
+          if (Number.isSafeInteger(Number(item.promptReferenceRevision))) {
+            findData.promptReferenceRevision = Number(item.promptReferenceRevision);
+            findData.referencesNeedReview = shouldReviewReferences(findData.prompt, findData.promptReferenceRevision, findData.modeIntentRevision);
+          }
           if (remoteVersionChanged && localDraft) {
             // Keep the local draft anchored to its original version. Advancing it
             // would let the next blur overwrite a newer remote edit.
@@ -868,6 +1092,7 @@ async function getTrackPromptList() {
           } else if (remoteVersionChanged) findData.version = remoteVersion;
           if (findData.reason !== (item?.reason ?? "")) findData.reason = item?.reason ?? "";
           if (terminal && (pending || (submittedIntent && item.idempotencyKey === submittedIntent.key))) promptGenerationGate.finish(findId);
+          if (terminal) findData.promptGenerationContext = undefined;
           if (item.state === "生成失败" && (previousState !== "生成失败" || previousJobId !== item.jobId) && (item.jobId || previousState === "生成中")) {
             window.$message.error(`提示词生成失败，${item.reason ?? "未知原因"}`);
           }

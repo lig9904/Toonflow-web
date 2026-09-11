@@ -4,9 +4,17 @@
       <div class="model">
         <modelSelect v-model="modelParmas.model" type="video" size="small" />
       </div>
-      <t-select size="small" class="mode" :value="modelParmas.mode" :onChange="handleBeforeChange">
+      <t-select size="small" class="mode" :value="modeIntentValue" :loading="modeSaving" :onChange="handleBeforeChange">
         <t-option v-for="(item, index) in modeList" :key="index" :value="item.value" :label="item.label"></t-option>
       </t-select>
+      <t-tag v-if="resolving" size="small" variant="light">正在匹配模式…</t-tag>
+      <t-tag v-else-if="resolvedMode" size="small" variant="light" theme="success">解析：{{ videoModeLabel(resolvedMode) }}</t-tag>
+      <t-tooltip v-if="referenceSummaryText" :content="referenceSummaryText">
+        <t-tag size="small" variant="outline">{{ referenceSummaryText }}</t-tag>
+      </t-tooltip>
+      <t-tooltip v-if="compatibility && !compatibility.ok" :content="compatibility.message || '当前模型与所选模式或素材不兼容'">
+        <t-tag size="small" theme="danger">模式不兼容</t-tag>
+      </t-tooltip>
       <t-tag v-if="followsReferenceRatio" size="small" variant="light" theme="warning">画幅跟随参考图</t-tag>
       <t-button
         size="small"
@@ -80,10 +88,17 @@ import axios from "@/utils/axios";
 import { videoDurations, videoResolutions } from "@/utils/mediaQuality";
 import { createIdempotencyKey } from "@/utils/idempotency";
 import type { SelectOption, SelectValue } from "tdesign-vue-next";
+import { modeIntentSelectValue, purposeLabel, videoModeLabel, type VideoModeIntent } from "../utils/videoMode";
 
 const props = defineProps<{
   modeOptions: VideoModel;
   modeList: { value: string; label: string }[];
+  modeIntent: VideoModeIntent;
+  modeSaving?: boolean;
+  resolving?: boolean;
+  resolvedMode?: VideoMode;
+  referenceSummary?: { total: number; image: number; video: number; audio: number; purposes: Record<string, number> };
+  compatibility?: { ok: boolean; code?: string; message?: string };
   trackId: number | undefined;
   trackVersion: number | undefined;
   trackIndex: number;
@@ -102,8 +117,19 @@ const modelParmas = defineModel<ModelSetting>({
   },
 });
 const availableDurations = computed(() => videoDurations(props.modeOptions).filter((duration) => duration >= props.trackScriptDuration));
+const modeIntentValue = computed(() => modeIntentSelectValue(props.modeIntent));
 const followsReferenceRatio = computed(() => props.modeOptions.referenceRatio === "adaptive"
-  && ["singleImage", "startFrameOptional", "endFrameOptional", "startEndRequired"].includes(String(modelParmas.value.mode)));
+  && ["singleImage", "startFrameOptional", "endFrameOptional", "startEndRequired"].includes(String(props.resolvedMode ?? props.modeIntent)));
+const referenceSummaryText = computed(() => {
+  const summary = props.referenceSummary;
+  if (!summary) return "";
+  const purposes = Object.entries(summary.purposes ?? {})
+    .filter(([, count]) => count > 0)
+    .map(([purpose, count]) => `${purposeLabel(purpose as any) || purpose}×${count}`)
+    .join("、");
+  const media = [`图${summary.image}`, `视频${summary.video}`, `音频${summary.audio}`].filter((part) => !part.endsWith("0")).join("、");
+  return `参考 ${summary.total} 项${media ? `（${media}）` : ""}${purposes ? ` · ${purposes}` : ""}`;
+});
 const availableResolutions = computed(() => videoResolutions(props.modeOptions, modelParmas.value.duration));
 watch(availableResolutions, (values) => { if (values.length && !values.includes(modelParmas.value.resolution)) modelParmas.value.resolution = values[0]; }, { immediate: true });
 const emit = defineEmits<{
@@ -159,6 +185,7 @@ async function updateDuration(newDuration: number) {
   .left {
     flex: 1;
     gap: 8px;
+    flex-wrap: wrap;
     .mode {
       width: 280px;
     }

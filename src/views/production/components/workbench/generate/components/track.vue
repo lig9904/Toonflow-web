@@ -32,6 +32,11 @@
           <t-tag class="indexTag" size="small">#{{ index + 1 }}</t-tag>
           <t-tag class="selectTag" theme="success" size="small" v-if="track.selectVideoId">已选择</t-tag>
           <t-tag class="promptStateTag" size="small" :theme="promptStateTheme(track)">提示词：{{ promptStateLabel(track) }}</t-tag>
+          <t-tooltip :content="trackModeSummary(track)">
+            <t-tag class="modeTag" size="small" :theme="track.compatibility && !track.compatibility.ok ? 'danger' : 'default'">
+              {{ videoModeLabel(track.resolvedMode ?? track.modeIntent ?? 'auto') }}
+            </t-tag>
+          </t-tooltip>
           <t-tooltip v-if="track.state === '生成失败' && track.reason" :content="track.reason">
             <span class="promptFailureMark">!</span>
           </t-tooltip>
@@ -82,10 +87,11 @@ import settingStore from "@/stores/setting";
 import { createGenerationIntentStore, shouldRetainGenerationIntent } from "@/utils/generationIntent";
 import { createIdempotencyKey } from "@/utils/idempotency";
 import { captureGenerateScope, positiveId, sameGenerateScope, validTrackIds, type PromptGenerationIntent } from "../utils/scope";
+import { captureVideoGenerationSettings, purposeLabel, videoGenerationIntentPayload, videoModeLabel, type VideoReference } from "../utils/videoMode";
 
 const { otherSetting } = storeToRefs(settingStore());
 const generationIntents = createGenerationIntentStore();
-const batchRequestIntents = createGenerationIntentStore<Array<{ videoId: number; trackId: number; jobId?: string; reused?: boolean; promptReview?: VideoPromptReview | null }>>();
+const batchRequestIntents = createGenerationIntentStore<Array<{ videoId: number; trackId: number; jobId?: string; reused?: boolean; promptReview?: VideoPromptReview | null; modeResolution?: VideoModeResolutionView }>>();
 const { project } = storeToRefs(projectStore());
 const { removeCache } = imageListCacheStore();
 const episodesId = inject<Ref<number>>("episodesId")!;
@@ -109,6 +115,9 @@ const props = defineProps<{
     finish: (id: number, retainIntent?: boolean) => void;
   };
   preparePromptGeneration: (ids: readonly number[], scope: { projectId: number; scriptId: number; sequence: number }) => Promise<boolean>;
+  prepareReferenceSelection: (ids: readonly number[], scope: { projectId: number; scriptId: number; sequence: number }) => Promise<boolean>;
+  referencesForTrack: (track: TrackItem, requireSrc?: boolean) => VideoReference[];
+  reviewContextForGeneration: (track: TrackItem, input: { model: string; modeIntentRevision: number; references: VideoReference[]; generation: { duration: number; resolution: string; audio: boolean } }) => string;
 }>();
 const activeTrackIndex = defineModel("activeTrackIndex", {
   default: 0,
@@ -128,6 +137,15 @@ const createTrackIntent = ref<{ signature: string; key: string }>();
 const disposed = ref(false);
 let batchSequence = 0;
 const hasPendingPrompt = computed(() => checkedTrackIds.value.some((id) => props.promptGenerationGate.isPending(id)));
+
+function trackModeSummary(track: TrackItem): string {
+  if (track.compatibility && !track.compatibility.ok) return track.compatibility.message ?? "当前模型与该片段的模式或素材不兼容";
+  const summary = track.referenceSummary;
+  if (!summary) return `模式：${videoModeLabel(track.resolvedMode ?? track.modeIntent ?? "auto")}`;
+  const purposes = Object.entries(summary.purposes ?? {}).filter(([, count]) => count > 0)
+    .map(([purpose, count]) => `${purposeLabel(purpose as any) || purpose}×${count}`).join("、");
+  return `模式：${videoModeLabel(track.resolvedMode ?? track.modeIntent ?? "auto")}；参考 ${summary.total} 项${purposes ? `（${purposes}）` : ""}`;
+}
 
 watch(
   () => props.scopeSequence,
@@ -334,6 +352,11 @@ async function batchGenText() {
   const requestSequence = ++batchSequence;
   const trackData: any[] = [];
   const selectedIds = validTrackIds(checkedTrackIds.value, trackList.value);
+  const generationSnapshot = captureVideoGenerationSettings(props.modelParmas);
+  const durationByTrack = new Map(trackList.value.filter((track) => selectedIds.includes(positiveId(track.id) ?? -1)).map((track) => {
+    const sourceDuration = props.sourceDuration(track);
+    return [track.id, props.resolveDuration(sourceDuration).duration ?? sourceDuration] as const;
+  }));
   checkedTrackIds.value = selectedIds;
   if (!selectedIds.length) {
     generateTextLoad.value = false;
@@ -352,24 +375,28 @@ async function batchGenText() {
   trackList.value.forEach((track) => {
     const trackId = positiveId(track.id);
     if (trackId == null || !selectedIds.includes(trackId)) return;
-    let info: ReturnType<typeof getTrackUploadInfo> = [];
-    if (props.modelParmas.mode == "text") {
-      info = []; // Match the actual text-to-video request.
-    } else {
-      info = getTrackUploadInfo(track);
-    }
+    const references = props.referencesForTrack(track);
     trackData.push({
       trackId,
       expectedVersion: track.version,
-      info: info.filter((i) => positiveId(i.id) != null),
+      references,
+      modeIntentRevision: track.modeIntentRevision ?? 0,
       idempotencyKey: "pending",
-      generation: {duration: props.resolveDuration(props.sourceDuration(track)).duration ?? props.sourceDuration(track), resolution: props.modelParmas.resolution, audio: Boolean(props.modelParmas.audio)},
+      generation: {duration: durationByTrack.get(track.id) ?? props.sourceDuration(track), resolution: generationSnapshot.resolution, audio: generationSnapshot.audio},
     });
+    track.promptGenerationContext = {
+      trackId,
+      model: generationSnapshot.model,
+      modeIntentRevision: track.modeIntentRevision ?? 0,
+      resolvedMode: track.resolvedMode,
+      generation: { duration: durationByTrack.get(track.id) ?? props.sourceDuration(track), resolution: generationSnapshot.resolution, audio: generationSnapshot.audio },
+      references,
+    };
     track.state = "生成中";
   });
   trackData.forEach((item) => {
     const track = trackList.value.find((candidate) => positiveId(candidate.id) === item.trackId);
-    const signature = JSON.stringify({ projectId: scope.projectId, scriptId: scope.scriptId, model: props.modelParmas.model, mode: props.modelParmas.mode, trackId: item.trackId, info: item.info, generation: item.generation, expectedVersion: track?.version });
+    const signature = JSON.stringify({ projectId: scope.projectId, scriptId: scope.scriptId, model: generationSnapshot.model, trackId: item.trackId, references: item.references, modeIntentRevision: item.modeIntentRevision, generation: item.generation, expectedVersion: track?.version });
     const previous = props.promptGenerationGate.getIntent(item.trackId);
     const intent = previous?.signature === signature ? previous : { signature, key: createIdempotencyKey("batch-video-prompt"), startedAt: Date.now() };
     props.promptGenerationGate.setIntent(item.trackId, intent);
@@ -382,13 +409,12 @@ async function batchGenText() {
       projectId: scope.projectId,
       scriptId: scope.scriptId,
       trackData,
-      model: props.modelParmas.model,
-      mode: props.modelParmas.mode,
+      model: generationSnapshot.model,
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
     });
     if (!sameGenerateScope(scope, project.value?.id, episodesId.value, props.scopeSequence, disposed.value)) return;
     if (Array.isArray(data)) {
-      data.forEach((item: { trackId: number; jobId?: string | null; state?: string; reason?: string | null }) => {
+      data.forEach((item: { trackId: number; jobId?: string | null; state?: string; reason?: string | null; modeResolution?: VideoModeResolutionView }) => {
         const track = trackList.value.find((candidate) => positiveId(candidate.id) === item.trackId);
         if (!track) return;
         const trackId = positiveId(track.id);
@@ -397,10 +423,20 @@ async function batchGenText() {
         props.promptGenerationGate.noteJob(trackId, item.jobId);
         if (intent) intent.jobId = item.jobId ?? undefined;
         track.promptJobId = item.jobId ?? null;
+        if (item.modeResolution) {
+          track.modeResolution = item.modeResolution;
+          track.modeIntent = item.modeResolution.modeIntent;
+          track.modeIntentRevision = item.modeResolution.modeIntentRevision;
+          track.resolvedMode = item.modeResolution.resolvedMode ?? undefined;
+          track.resolvedReferences = item.modeResolution.resolvedReferences;
+          track.referenceSummary = item.modeResolution.referenceSummary ?? undefined;
+          track.compatibility = item.modeResolution.compatibility;
+        }
         if (item.state === "failed") {
           track.state = "生成失败";
           track.reason = item.reason ?? "提示词任务预校验失败";
           props.promptGenerationGate.finish(trackId);
+          track.promptGenerationContext = undefined;
         }
       });
     }
@@ -413,6 +449,7 @@ async function batchGenText() {
       trackList.value.filter((track) => selectedIds.includes(positiveId(track.id) ?? -1)).forEach((track) => {
         track.state = "生成失败";
         track.reason = e?.message ?? "批量请求失败";
+        track.promptGenerationContext = undefined;
       });
       const status = Number(e?.status ?? e?.response?.status);
       selectedIds.forEach((id) => props.promptGenerationGate.finish(id, !(Number.isSafeInteger(status) && status < 500)));
@@ -420,27 +457,6 @@ async function batchGenText() {
   } finally {
     if (!disposed.value && requestSequence === batchSequence) generateTextLoad.value = false;
   }
-}
-/**
- * 获取指定轨道的上传数据：
- * 当前活动轨道 → uploadBox（含未保存的最新编辑）
- * 其他轨道 → uploadBoxCache（含切换前的编辑）→ 降级 track.medias
- * @param filterEmpty 是否过滤掉没有 src 的项（生成视频时需要过滤，生成提示词时不需要）
- */
-function getTrackUploadInfo(track: TrackItem, filterEmpty = false) {
-  const activeTrackId = trackList.value[activeTrackIndex.value]?.id;
-
-  if (track.id === activeTrackId) {
-    const items = props.imageList as UploadItem[];
-    return (filterEmpty ? items.filter((item) => Boolean(item.src)) : items).map(({ id, sources, fileType }) => ({
-      id,
-      sources: (sources ?? "storyboard") as string,
-      fileType,
-    }));
-  }
-  return track.medias
-    .filter((m) => !filterEmpty || Boolean(m.src))
-    .map(({ id, sources, fileType }) => ({ id, sources: (sources ?? "storyboard") as string, fileType }));
 }
 const generateVideoLoad = ref(false);
 /** 批量为已勾选轨道生成视频 */
@@ -459,27 +475,46 @@ function batchGenVideo() {
       const checkedTrackData = trackList.value.filter((track) => selectedIds.includes(positiveId(track.id) ?? -1));
       const notHasPrompt = checkedTrackData.filter((i) => !i.prompt);
       if (notHasPrompt.length) return window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
+      const generationSnapshot = captureVideoGenerationSettings(props.modelParmas);
+      const durationPlans = new Map(checkedTrackData.map((track) => {
+        const sourceDuration = props.sourceDuration(track);
+        return [track.id, {
+          sourceDuration,
+          durationChoice: props.resolveDuration(sourceDuration),
+          resolutionSupported: props.supportsResolution(sourceDuration),
+        }] as const;
+      }));
       generateVideoLoad.value = true;
+      const referencesPrepared = await props.prepareReferenceSelection(selectedIds, scope);
+      if (!referencesPrepared || !sameGenerateScope(scope, project.value?.id, episodesId.value, props.scopeSequence, disposed.value)) {
+        generateVideoLoad.value = false;
+        return;
+      }
 
       const unsupportedTracks: number[] = [];
       const unsupportedQualityTracks: number[] = [];
       const trackData = checkedTrackData.map((track) => {
         const trackId = track.id;
-        const uploadData = props.modelParmas.mode === "text" ? [] : getTrackUploadInfo(track, true);
-        const sourceDuration = props.sourceDuration(track);
-        const durationChoice = props.resolveDuration(sourceDuration);
+        const references = props.referencesForTrack(track);
+        const { sourceDuration, durationChoice, resolutionSupported } = durationPlans.get(track.id)!;
         if (durationChoice.duration == null) unsupportedTracks.push(trackId);
-        else if (!props.supportsResolution(sourceDuration)) unsupportedQualityTracks.push(trackId);
-        const intentPayload = {
+        else if (!resolutionSupported) unsupportedQualityTracks.push(trackId);
+        const trackRequest = {
           duration: durationChoice.duration ?? sourceDuration,
           prompt: track.prompt,
-          uploadData,
+          references,
+          modeIntentRevision: track.modeIntentRevision ?? 0,
           trackId,
         };
         const intentScope = `batch-track:${scope.projectId}:${scope.scriptId}:${String(trackId)}`;
-        const intent = generationIntents.getOrCreate(intentScope, intentPayload);
+        const intent = generationIntents.getOrCreate(intentScope, videoGenerationIntentPayload({
+          ...trackRequest,
+          model: generationSnapshot.model,
+          resolution: generationSnapshot.resolution,
+          audio: generationSnapshot.audio,
+        }));
         return {
-          ...intentPayload,
+          ...trackRequest,
           idempotencyKey: intent.key,
         };
       });
@@ -496,10 +531,9 @@ function batchGenVideo() {
       const requestData = {
         projectId: scope.projectId,
         scriptId: scope.scriptId,
-        model: props.modelParmas.model,
-        mode: props.modelParmas.mode,
-        resolution: props.modelParmas.resolution,
-        audio: Boolean(props.modelParmas.audio),
+        model: generationSnapshot.model,
+        resolution: generationSnapshot.resolution,
+        audio: generationSnapshot.audio,
         trackData,
       };
       const batchScope = `batch-request:${scope.projectId}:${scope.scriptId}:${checkedTrackData
@@ -520,15 +554,28 @@ function batchGenVideo() {
           if (payload) generationIntents.markSuccess(intentScope, payload.idempotencyKey);
         });
         const videoRecordId: Record<number, number> = {};
-        data.forEach((item: { videoId: number; trackId: number; promptReview?: VideoPromptReview | null }) => {
+        data.forEach((item: { videoId: number; trackId: number; promptReview?: VideoPromptReview | null; modeResolution?: VideoModeResolutionView }) => {
           videoRecordId[item.trackId] = item.videoId;
           const track = checkedTrackData.find((candidate) => candidate.id === item.trackId);
           const payload = trackData.find((candidate) => candidate.trackId === item.trackId);
           if (track && payload) {
+            if (item.modeResolution) {
+              track.modeResolution = item.modeResolution;
+              track.modeIntent = item.modeResolution.modeIntent;
+              track.modeIntentRevision = item.modeResolution.modeIntentRevision;
+              track.resolvedMode = item.modeResolution.resolvedMode ?? undefined;
+              track.resolvedReferences = item.modeResolution.resolvedReferences;
+              track.referenceSummary = item.modeResolution.referenceSummary ?? undefined;
+              track.compatibility = item.modeResolution.compatibility;
+            }
             track.promptReview = item.promptReview ?? null;
             track.promptReviewPrompt = track.prompt;
-            track.promptReviewContext = JSON.stringify({ trackId: track.id, model: props.modelParmas.model, mode: props.modelParmas.mode,
-              generation: { duration: payload.duration, resolution: props.modelParmas.resolution, audio: Boolean(props.modelParmas.audio) }, info: payload.uploadData });
+            track.promptReviewContext = props.reviewContextForGeneration(track, {
+              model: generationSnapshot.model,
+              modeIntentRevision: payload.modeIntentRevision,
+              references: payload.references,
+              generation: { duration: payload.duration, resolution: generationSnapshot.resolution, audio: generationSnapshot.audio },
+            });
           }
         });
         checkedTrackData.forEach((i) => {
@@ -672,6 +719,16 @@ onUnmounted(() => {
         left: 28px;
         z-index: 2;
         pointer-events: none;
+      }
+      .modeTag {
+        position: absolute;
+        top: 32px;
+        left: 4px;
+        z-index: 2;
+        pointer-events: none;
+        max-width: 188px;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
       .promptFailureMark {
         position: absolute;

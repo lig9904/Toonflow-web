@@ -9,6 +9,7 @@
     "build-only": "vite build",
     "type-check": "vue-tsc --build --force",
     "test:video-prompt-scope": "node --experimental-strip-types scripts/testVideoPromptScope.ts",
+    "test:video-mode-resolution": "node --experimental-strip-types scripts/testVideoModeResolution.ts",
     "test:builtin-agent": "node --experimental-strip-types scripts/testBuiltinAgent.ts",
     "test:auth-migration": "node --experimental-strip-types scripts/testAuthMigration.ts",
     "license": "node scripts/license.ts",

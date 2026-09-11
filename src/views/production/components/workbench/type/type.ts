@@ -1,12 +1,16 @@
 type ReferenceType = "videoReference" | "imageReference" | "audioReference" | "textReference";
 type Type = "imageReference" | "startImage" | "endImage" | "videoReference" | "audioReference";
 type VideoMode = "singleImage" | "startEndRequired" | "endFrameOptional" | "startFrameOptional" | "text" | ReferenceType[];
+type VideoReferencePurpose = "first_frame" | "last_frame" | "identity_reference" | "style_reference" | "motion_reference" | "audio_reference";
+type VideoModeIntent = "auto" | VideoMode;
 
 interface UploadItemBase {
   fileType: "image" | "video" | "audio";
   id: number | null;
   src?: string;
   prompt?: string;
+  purpose?: VideoReferencePurpose;
+  assetType?: "role" | "tool" | "scene" | "clip" | "audio";
 }
 
 interface UploadItemStoryboard extends UploadItemBase {
@@ -51,10 +55,28 @@ interface VideoPromptReview {
   summary: string; revised: boolean; reviewedAt: number;
 }
 
+interface VideoModeResolutionView {
+  trackId: number;
+  modeIntent: VideoModeIntent;
+  modeIntentRevision: number;
+  resolvedMode?: VideoMode | null;
+  resolvedReferences: Array<{ id: number; sources: "storyboard" | "assets"; fileType?: "image" | "video" | "audio"; purpose: VideoReferencePurpose }>;
+  referenceSummary?: { total: number; image: number; video: number; audio: number; purposes: Record<string, number> } | null;
+  compatibility: { ok: boolean; code?: string; message?: string };
+}
+
 interface TrackItem {
   promptReview?: VideoPromptReview | null;
   promptReviewPrompt?: string;
   promptReviewContext?: string;
+  promptGenerationContext?: {
+    trackId: number;
+    model: string;
+    modeIntentRevision: number;
+    resolvedMode?: VideoMode;
+    generation: { duration: number; resolution: string; audio: boolean };
+    references: Array<{ id: number; sources: "storyboard" | "assets"; fileType?: "image" | "video" | "audio"; purpose?: VideoReferencePurpose }>;
+  };
   id: number;
   version?: number;
   prompt: string;
@@ -65,6 +87,17 @@ interface TrackItem {
   medias: TrackMedia[];
   videoList: VideoItem[];
   duration: number;
+  modeIntent?: VideoModeIntent;
+  modeIntentRevision?: number;
+  promptReferenceRevision?: number;
+  references?: Array<{ id: number; sources: "storyboard" | "assets"; fileType?: "image" | "video" | "audio"; purpose?: VideoReferencePurpose }>;
+  referencesInitialized?: boolean;
+  modeResolution?: VideoModeResolutionView;
+  resolvedMode?: VideoMode;
+  resolvedReferences?: Array<{ id: number; sources: "storyboard" | "assets"; fileType?: "image" | "video" | "audio"; purpose: VideoReferencePurpose }>;
+  referenceSummary?: { total: number; image: number; video: number; audio: number; purposes: Record<string, number> };
+  compatibility?: { ok: boolean; code?: string; message?: string };
+  referencesNeedReview?: boolean;
 }
 
 interface VideoItem {
@@ -81,6 +114,8 @@ interface TrackMediaBase {
   prompt?: string;
   fileType: "image" | "video" | "audio";
   slotType?: Type; // 本地保存时记录的 slot 类型，用于切换轨道时精确还原位置
+  purpose?: VideoReferencePurpose;
+  assetType?: "role" | "tool" | "scene" | "clip" | "audio";
   index?: number;
 }
 

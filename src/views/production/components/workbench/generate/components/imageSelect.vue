@@ -1,8 +1,8 @@
 <template>
   <div class="imageUploadBox ac">
-    <!-- 单图模式 -->
-    <template v-if="mode == 'singleImage' || Array.isArray(parseMode(mode as string))">
-      <div class="uploadBtn c fc" v-for="(item, index) in mode == 'singleImage' ? imageList.slice(0, 1) : imageList" :key="index">
+    <!-- 自动/多参考/文本模式都保留完整素材列表，最终采用项由后端解析快照决定。 -->
+    <template v-if="mode">
+      <div class="uploadBtn referenceWithPurpose c fc" v-for="(item, index) in displayItems" :key="`${item.sources}:${item.id}:${index}`">
         <template v-if="item.src">
           <t-image v-if="item.fileType == 'image'" :src="item.src" fit="contain" class="uploadPreview">
             <template #overlayContent>
@@ -29,7 +29,7 @@
         <div class="imageTitleWrap" v-if="item.sources == 'storyboard' && item.index != null">
           {{ `P${item.index + 1}` }}
         </div>
-        <div class="clearBtn" @click="splitImage(index)">
+        <div class="clearBtn" @click="splitImageItem(item)">
           <i-close size="12" />
         </div>
         <div class="source">
@@ -37,48 +37,19 @@
             {{ item.sources == "storyboard" ? $t("workbench.generate.storyboard") : $t("workbench.generate.assets") }}
           </t-tag>
         </div>
+        <t-select
+          class="purposeSelect"
+          size="small"
+          :value="referencePurpose(item, index)"
+          :options="purposeOptions(item)"
+          @click.stop
+          @change="(value) => setPurposeForItem(item, String(value) as VideoReferencePurpose)" />
       </div>
     </template>
-    <template v-else-if="mode == 'endFrameOptional' || mode == 'startFrameOptional' || mode == 'startEndRequired'">
-      <div class="uploadBtn c fc" v-for="(item, index) in buildLabel" :key="item.value" @click="handleMixedAdd(item.value as 'start' | 'end')">
-        <div v-if="!isEmptySlot(imageList?.[index])" style="flex: 1; width: 100%" class="ac">
-          <template v-if="imageList?.[index]?.src">
-            <t-image v-if="imageList?.[index]?.fileType == 'image'" :src="imageList?.[index]!.src" fit="contain" class="uploadPreview">
-              <template #overlayContent>
-                <div class="imageToolsWrap">
-                  <ImageTools :src="imageList?.[index]!.src" position="br" />
-                </div>
-              </template>
-            </t-image>
-            <div v-else-if="imageList?.[index]?.fileType == 'audio'" class="mediaPreview audioPreview">
-              <i-acoustic size="20" />
-              <span class="mediaLabel">音频</span>
-            </div>
-            <div v-else-if="imageList?.[index]?.fileType == 'video'" class="mediaPreview videoPreview">
-              <video class="uploadPreview" :src="imageList?.[index]!.src" preload="metadata" muted />
-            </div>
-          </template>
-          <template v-else>
-            <t-tooltip theme="primary" :content="imageList?.[index]?.prompt || ''">
-              <span style="font-size: 20px">文</span>
-            </t-tooltip>
-          </template>
-          <div class="imageTitleWrap" v-if="imageList?.[index]?.sources == 'storyboard' && imageList?.[index]?.index != null">
-            {{ `P${imageList[index]?.index + 1}` }}
-          </div>
-          <div class="clearBtn" @click.stop="clearImage(index)">
-            <i-close size="12" />
-          </div>
-          <div class="source">
-            <t-tag size="small">
-              {{ imageList?.[index]?.sources == "storyboard" ? $t("workbench.generate.storyboard") : $t("workbench.generate.assets") }}
-            </t-tag>
-          </div>
-        </div>
-        <template v-else>
-          <i-plus size="24"></i-plus>
-          {{ item.label }}
-        </template>
+    <template v-if="isFrameMode">
+      <div class="uploadBtn c fc" v-for="slot in missingFrameSlots" :key="slot.value" @click="handleMixedAdd(slot.value as 'start' | 'end')">
+        <i-plus size="24"></i-plus>
+        {{ slot.label }}
       </div>
     </template>
     <div class="uploadBtn c fc" v-if="isShowAddImage" @click="handleMixedAdd()">
@@ -113,11 +84,12 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import "@/views/production/components/workbench/type/type";
-import assetsCheck, { type AssetType, type ClipMediaType } from "@/utils/assetsCheck";
+import assetsCheck, { type ClipMediaType } from "@/utils/assetsCheck";
 import axios from "@/utils/axios";
+import { defaultReferencePurpose, parseModeIntentValue, purposeLabel, type VideoModeIntent, type VideoReferencePurpose } from "../utils/videoMode";
 
 const props = defineProps<{
-  mode: VideoMode;
+  mode: VideoModeIntent;
   storyboardList: StoryboardItem[];
 }>();
 const imageList = defineModel<UploadItem[]>({
@@ -125,12 +97,6 @@ const imageList = defineModel<UploadItem[]>({
 });
 //分镜选择弹窗
 const storyboardDialogVisible = ref(false);
-
-/** 空占位项，用于首尾帧模式中未设置的槽位 */
-const EMPTY_SLOT: UploadItem = { fileType: "image", id: null, src: "" } as any;
-function isEmptySlot(item: UploadItem | undefined): boolean {
-  return !item || !item.id;
-}
 
 const buildLabel = computed(() => {
   const startOptional = props.mode === "startFrameOptional";
@@ -141,30 +107,59 @@ const buildLabel = computed(() => {
   ];
 });
 
-/** 确保 imageList 始终有两个槽位（首帧 index=0，尾帧 index=1） */
-function ensureFrameSlots(): UploadItem[] {
-  const list = [...imageList.value];
-  while (list.length < 2) list.push({ ...EMPTY_SLOT });
-  return list;
-}
+const isFrameMode = computed(() => ["endFrameOptional", "startFrameOptional", "startEndRequired"].includes(String(props.mode)));
+const displayItems = computed(() => {
+  if (!isFrameMode.value) return imageList.value;
+  const rank = (item: UploadItem) => item.purpose === "first_frame" ? 0 : item.purpose === "last_frame" ? 1 : 2;
+  return [...imageList.value].sort((left, right) => rank(left) - rank(right));
+});
+const missingFrameSlots = computed(() => buildLabel.value.filter((slot) => {
+  const purpose = slot.value === "start" ? "first_frame" : "last_frame";
+  return !imageList.value.some((item) => item.purpose === purpose);
+}));
 
 /** 将 item 设置到首帧或尾帧槽位 */
 function setFrameSlot(slot: "start" | "end", item: UploadItem) {
-  const list = ensureFrameSlots();
-  list[slot === "start" ? 0 : 1] = item;
+  const purpose = slot === "start" ? "first_frame" : "last_frame";
+  const list = [...imageList.value];
+  const existingIndex = list.findIndex((candidate) => candidate.purpose === purpose);
+  const selected = { ...item, purpose } as UploadItem;
+  if (existingIndex >= 0) list[existingIndex] = selected;
+  else list.push(selected);
   imageList.value = list;
 }
 
 /** 解析模式值（字符串或 JSON 数组） */
-function parseMode(value: string): VideoMode | null {
-  if (!value) return null;
+function parseMode(value: unknown): VideoModeIntent | null {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value !== "string" || !value) return null;
   try {
     const parsed = JSON.parse(value);
     if (Array.isArray(parsed)) return parsed as ReferenceType[];
   } catch {
-    return value as Exclude<VideoMode, ReferenceType[]>;
+    return value as Exclude<VideoModeIntent, string[]>;
   }
-  return value as Exclude<VideoMode, ReferenceType[]>;
+  return value as Exclude<VideoModeIntent, string[]>;
+}
+
+function referencePurpose(item: UploadItem, index: number): VideoReferencePurpose {
+  const unlabelledStoryboardCount = imageList.value.filter((candidate) => candidate.sources === "storyboard" && !candidate.purpose).length;
+  return defaultReferencePurpose(item, parseModeIntentValue(props.mode), index, unlabelledStoryboardCount);
+}
+
+function purposeOptions(item: UploadItem) {
+  if (item.fileType === "audio") return [{ value: "audio_reference", label: purposeLabel("audio_reference") }];
+  if (item.fileType === "video") return [{ value: "motion_reference", label: purposeLabel("motion_reference") }];
+  return (["first_frame", "last_frame", "identity_reference", "style_reference"] as VideoReferencePurpose[])
+    .map((value) => ({ value, label: purposeLabel(value) }));
+}
+
+function setPurposeForItem(target: UploadItem, purpose: VideoReferencePurpose) {
+  imageList.value = imageList.value.map((item) => {
+    if (item === target) return { ...item, purpose };
+    if ((purpose === "first_frame" || purpose === "last_frame") && item.purpose === purpose) return { ...item, purpose: "identity_reference" };
+    return item;
+  });
 }
 
 //判断是否显示添加参考图
@@ -176,7 +171,8 @@ const isShowAddImage = computed(() => {
   if (mode == "endFrameOptional" || mode == "startEndRequired" || mode == "startFrameOptional") {
     return false;
   }
-  if (mode == "text") return false;
+  // Text mode keeps references visible and editable so switching models/modes
+  // never destroys the user's selection, though the backend may resolve none.
   //多参模式默认 true
   return true;
 });
@@ -190,7 +186,7 @@ function getFileTypeByExt(src: string | undefined): "image" | "video" | "audio" 
 }
 /** 根据混合模式推导当前允许的 clip 媒体类型 */
 const mixedClipMediaTypes = computed<ClipMediaType[]>(() => {
-  const mode = parseMode(String(props.mode));
+  const mode = parseMode(props.mode);
   if (!Array.isArray(mode)) return [];
   const map: Record<string, ClipMediaType> = { audioReference: "audio", imageReference: "image", videoReference: "video" };
   return mode.filter((m) => m in map).map((m) => map[m]);
@@ -199,7 +195,7 @@ let currentSlot: "start" | "end" | "" = "";
 function handleMixedAdd(slot: "start" | "end" | "" = "") {
   if (!props.mode) return window.$message.error($t("workbench.generate.notSelectMode"));
   currentSlot = slot;
-  const multiple = Array.isArray(parseMode(props.mode as string));
+  const multiple = props.mode === "auto" || props.mode === "text" || Array.isArray(parseMode(props.mode));
   const dlg = DialogPlugin.confirm({
     header: $t("workbench.generate.selectSource"),
     confirmBtn: $t("workbench.generate.confirm"),
@@ -214,25 +210,27 @@ function handleMixedAdd(slot: "start" | "end" | "" = "") {
         if (asset.type === "audio" && asset?.sonAssets?.length) {
           return asset.sonAssets.map((sub: any) => {
             const fileType = getFileTypeByExt(sub.src);
-            return {
+            const item = {
               fileType,
               sources: "assets",
               src: sub.src,
               id: sub.id,
               prompt: sub.prompt,
+              assetType: "audio",
             } as UploadItem;
+            return { ...item, purpose: defaultReferencePurpose(item, parseModeIntentValue(props.mode), imageList.value.length) } as UploadItem;
           });
         }
         const fileType = getFileTypeByExt(asset.src);
-        return [
-          {
-            fileType,
-            sources: "assets",
-            src: asset.src,
-            id: asset.id,
-            prompt: asset.prompt,
-          } as UploadItem,
-        ];
+        const item = {
+          fileType,
+          sources: "assets",
+          src: asset.src,
+          id: asset.id,
+          prompt: asset.prompt,
+          assetType: asset.type,
+        } as UploadItem;
+        return [{ ...item, purpose: defaultReferencePurpose(item, parseModeIntentValue(props.mode), imageList.value.length) } as UploadItem];
       });
       if (slot === "start" || slot === "end") {
         setFrameSlot(slot, newItems[0]);
@@ -243,7 +241,8 @@ function handleMixedAdd(slot: "start" | "end" | "" = "") {
         const { data } = await axios.post("/production/workbench/getAudioBindAssetsList", {
           assetsIds: assetsNotAudioIds.map((i) => i.id),
         });
-        imageList.value = [...imageList.value, ...newItems, ...(data ?? [])];
+        const boundAudio = (data ?? []).map((item: UploadItem) => ({ ...item, purpose: "audio_reference", assetType: "audio" }));
+        imageList.value = [...imageList.value, ...newItems, ...boundAudio];
       }
     },
     onCancel: () => {
@@ -251,11 +250,6 @@ function handleMixedAdd(slot: "start" | "end" | "" = "") {
       storyboardDialogVisible.value = true;
     },
   });
-}
-function clearImage(index: number) {
-  const list = ensureFrameSlots();
-  list[index] = { ...EMPTY_SLOT };
-  imageList.value = list;
 }
 /** 分镜弹窗选中回调 */
 function pickStoryboard(sb: StoryboardItem) {
@@ -273,6 +267,8 @@ function pickStoryboard(sb: StoryboardItem) {
   if (currentSlot === "start" || currentSlot === "end") {
     setFrameSlot(currentSlot, newItem);
   } else {
+    // Keep generic storyboard references unlabelled. The resolver treats one
+    // storyboard as a start frame and several as multimodal/style references.
     imageList.value = [...imageList.value, newItem];
   }
 }
@@ -280,6 +276,10 @@ function splitImage(index: number) {
   const list = [...imageList.value];
   list.splice(index, 1);
   imageList.value = list;
+}
+function splitImageItem(target: UploadItem) {
+  const index = imageList.value.indexOf(target);
+  if (index >= 0) splitImage(index);
 }
 </script>
 
@@ -323,6 +323,7 @@ function splitImage(index: number) {
     position: relative;
     border: 1px dashed var(--td-component-border);
     border-radius: 8px;
+    margin-bottom: 28px;
     &:hover {
       border-color: var(--td-text-color);
       cursor: pointer;
@@ -410,6 +411,17 @@ function splitImage(index: number) {
     &:hover .source {
       display: flex;
     }
+  }
+  .referenceWithPurpose {
+    width: 116px;
+    min-width: 116px;
+  }
+  .purposeSelect {
+    position: absolute;
+    left: 0;
+    top: 84px;
+    width: 116px;
+    z-index: 3;
   }
   .storyboardGrid {
     display: grid;
