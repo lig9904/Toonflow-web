@@ -7,6 +7,7 @@
     <div class="referenceImage">
       <div class="uploadBtn">
         <imageSelect :mode="modelParmas.mode as VideoMode" v-model="imageList" :storyboard-list="storyboardList" />
+        <t-button v-if="modelParmas.model.startsWith('volcengineSd2:')" size="small" variant="outline" :disabled="!scopeReady || !trustedLocalTargets.length" @click="trustedAssetsVisible = true">火山素材库</t-button>
       </div>
     </div>
     <div class="modelSelect">
@@ -54,6 +55,7 @@
           @generate="generateVideo" />
       </div>
     </div>
+    <VolcengineTrustedAssets v-model="trustedAssetsVisible" :project-id="project?.id" :script-id="episodesId" :targets="trustedLocalTargets" />
     <div class="track">
       <newTrack
         v-model:activeTrackIndex="activeTrackIndex"
@@ -79,6 +81,8 @@
 import type { Ref } from "vue";
 import newTrack from "./components/track.vue";
 import imageSelect from "./components/imageSelect.vue";
+import VolcengineTrustedAssets from "@/components/volcengineTrustedAssets.vue";
+import type { TrustedLocalTarget } from "@/components/trustedAssets/controller";
 import modeMenu from "./components/modeMenu.vue";
 import videoCard from "./components/video.vue";
 import "@/views/production/components/workbench/type/type";
@@ -172,6 +176,18 @@ const imageList = computed({
     }
   },
 });
+
+const trustedAssetsVisible = ref(false);
+const trustedLocalTargets = computed<TrustedLocalTarget[]>(() => {
+  if (!scopeReady.value) return [];
+  const selected: TrustedLocalTarget[] = imageList.value.filter(item => positiveId(item.id) && item.src && ['assets','storyboard'].includes(item.sources)).map(item => ({
+    targetKind: item.sources === 'storyboard' ? 'storyboard' : 'asset', targetId: Number(item.id),
+    name: item.sources === 'storyboard' ? `分镜 P${item.index + 1}` : (item.prompt?.slice(0, 45) || `已选素材 ${item.id}`), src: item.src, mediaType: item.fileType,
+  }));
+  const boards: TrustedLocalTarget[] = storyboardList.value.filter(item => item.src && positiveId(item.id)).map(item => ({targetKind:'storyboard',targetId:Number(item.id),name:`分镜 P${item.index + 1}`,src:item.src,mediaType:'image'}));
+  return [...new Map([...selected,...boards].map(item => [`${item.targetKind}:${item.targetId}`,item])).values()];
+});
+watch(() => [project.value?.id, episodesId.value], () => { trustedAssetsVisible.value = false; });
 
 function orderReferenceItems(items: UploadItem[]): UploadItem[] {
   // Reference order is semantic: in frame modes it identifies start/end,

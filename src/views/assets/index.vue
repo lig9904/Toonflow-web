@@ -116,6 +116,7 @@
                       </template>
                       <template #operation="{ row: subRow }">
                         <t-space :size="0">
+                          <t-button v-if="!props.selectorMode" theme="primary" variant="text" :disabled="!subRow.id" @click="openTrustedAsset(subRow)">火山素材</t-button>
                           <t-button theme="primary" variant="text" :disabled="isGenerating(subRow.id)" @click="generate(subRow)">
                             <template #icon>
                               <i-magic :size="18" />
@@ -190,6 +191,7 @@
                 </template>
                 <template #operation="{ row }">
                   <t-space :size="0">
+                    <t-button v-if="!props.selectorMode" theme="primary" variant="text" :disabled="!row.id" @click="openTrustedAsset(row)">火山素材</t-button>
                     <t-button theme="primary" variant="text" :disabled="isGenerating(row.id)" @click="generate(row)">
                       <template #icon>
                         <i-magic :size="18" />
@@ -265,6 +267,7 @@
                 </template>
                 <template #operation="{ row }">
                   <t-space :size="0">
+                    <t-button v-if="!props.selectorMode" theme="primary" variant="text" :disabled="!row.id" @click="openTrustedAsset(row)">火山素材</t-button>
                     <t-button theme="primary" variant="text" @click="handleEdit(row)">
                       <template #icon>
                         <t-icon name="edit" />
@@ -328,6 +331,7 @@
                       </template>
                       <template #operation="{ row: subRow }">
                         <t-space :size="0">
+                          <t-button v-if="!props.selectorMode" theme="primary" variant="text" :disabled="!subRow.id" @click="openTrustedAsset(subRow)">火山素材</t-button>
                           <t-button theme="danger" variant="text" :disabled="isGenerating(subRow.id)" @click="handleDelete(subRow)">
                             <template #icon>
                               <t-icon name="delete" />
@@ -355,6 +359,7 @@
                 </template>
                 <template #operation="{ row }">
                   <t-space :size="0">
+                    <t-button v-if="!props.selectorMode" theme="primary" variant="text" :disabled="!row.id" @click="openTrustedAsset(row)">火山素材</t-button>
                     <t-button theme="primary" variant="text" @click="handleEdit(row)">
                       <template #icon>
                         <t-icon name="edit" />
@@ -375,6 +380,7 @@
         </t-tab-panel>
       </t-tabs>
     </div>
+    <VolcengineTrustedAssets v-model="trustedAssetsVisible" :project-id="project?.id" :targets="trustedAssetTargets" />
     <addAssets
       v-model="addAssetsShow"
       :type="assetOptions"
@@ -437,6 +443,8 @@ import addAssets from "./components/addAssets.vue";
 import addAudioAssets from "./components/addAudioAssets.vue";
 import generateImage from "./components/generateImage.vue";
 import projectStore from "@/stores/project";
+import VolcengineTrustedAssets from "@/components/volcengineTrustedAssets.vue";
+import type { TrustedLocalTarget } from "@/components/trustedAssets/controller";
 import settingStore from "@/stores/setting";
 import { createIdempotencyKey } from "@/utils/idempotency";
 const { otherSetting } = storeToRefs(settingStore());
@@ -543,6 +551,15 @@ interface Asset {
   version?: number;
 }
 const tableData = ref<Asset[]>([]);
+const trustedAssetsVisible = ref(false);
+const trustedAssetTargets = ref<TrustedLocalTarget[]>([]);
+function openTrustedAsset(asset: Asset) {
+  if (!Number.isSafeInteger(Number(project.value?.id)) || !asset.id) return;
+  const mediaType = getMediaType(asset.src || asset.filePath);
+  trustedAssetTargets.value = [{ targetKind: 'asset', targetId: Number(asset.id), name: asset.name || `素材 ${asset.id}`, src: asset.src || asset.filePath, ...(mediaType === "unknown" ? {} : { mediaType }) }];
+  trustedAssetsVisible.value = true;
+}
+watch(() => project.value?.id, () => { trustedAssetsVisible.value = false; trustedAssetTargets.value = []; });
 // 分页配置
 const pagination = ref({
   page: 1,
