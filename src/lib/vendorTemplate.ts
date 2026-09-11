@@ -67,7 +67,7 @@ type ReferenceList =
 interface ImageConfig {
   prompt: string;
   referenceList?: Extract<ReferenceList, { type: "image" }>[];
-  size: "1K" | "2K" | "3K" | "4K";
+  size: "1K" | "1.5K" | "2K" | "3K" | "4K";
   aspectRatio: `${number}:${number}`;
 }
 

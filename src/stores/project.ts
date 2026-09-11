@@ -10,7 +10,7 @@ interface Project {
   imageModel: string;
   videoModel: string;
   projectType: string;
-  imageQuality: "1K" | "2K" | "3K" | "4K" | "";
+  imageQuality: "1K" | "1.5K" | "2K" | "3K" | "4K" | "";
   mode: string;
   directorManual: string;
   version?: number;

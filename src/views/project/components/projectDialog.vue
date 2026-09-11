@@ -318,7 +318,7 @@ const emit = defineEmits<{
       imageModel: string;
       videoModel: string;
       projectType: string;
-      imageQuality: "1K" | "2K" | "3K" | "4K" | "";
+      imageQuality: "1K" | "1.5K" | "2K" | "3K" | "4K" | "";
       mode: string;
       expectedVersion?: number;
       mutationKey?: string;
@@ -338,7 +338,7 @@ interface ProjectData {
   imageModel: string;
   videoModel: string;
   projectType: string;
-  imageQuality: "1K" | "2K" | "3K" | "4K" | "";
+  imageQuality: "1K" | "1.5K" | "2K" | "3K" | "4K" | "";
   visualManual?: string;
   mode: string;
   version?: number;
@@ -354,7 +354,7 @@ interface ProjectFormData {
   videoRatio: string;
   imageModel: string;
   videoModel: string;
-  imageQuality: "1K" | "2K" | "3K" | "4K" | "";
+  imageQuality: "1K" | "1.5K" | "2K" | "3K" | "4K" | "";
   mode: string;
   creativePrompt?: string;
   startBuiltinAgent?: boolean;
