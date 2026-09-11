@@ -1,5 +1,9 @@
 <template>
   <div class="index fc">
+    <div v-if="!scopeReady || loadError" role="status" class="scopeNotice">
+      {{ loadError || (currentScope ? "正在加载当前剧集的片段…" : "请先选择剧集") }}
+      <t-button v-if="loadError" size="small" variant="text" @click="getGenerateData">重新加载</t-button>
+    </div>
     <div class="referenceImage">
       <div class="uploadBtn">
         <imageSelect :mode="modelParmas.mode as VideoMode" v-model="imageList" :storyboard-list="storyboardList" />
@@ -24,7 +28,7 @@
       <div class="prompt" v-if="currentTrack">
         <t-card :title="'#' + (activeTrackIndex + 1) + $t('workbench.generate.generateText')" header-bordered class="videoPrompt">
           <template #actions>
-            <t-button size="small" class="genTextbtn" :loading="currentTrack.state == '生成中'" @click="genText">
+            <t-button size="small" class="genTextbtn" :disabled="!scopeReady || currentPromptPending || currentTrack.state == '生成中'" :loading="currentPromptPending || currentTrack.state == '生成中'" @click="genText">
               {{ $t("workbench.generate.generateText") }}
             </t-button>
           </template>
@@ -57,6 +61,10 @@
         :sourceDuration="sourceDurationForTrack"
         :resolveDuration="resolveDuration"
         :supportsResolution="supportsResolution"
+        :scope-ready="scopeReady"
+        :scope-sequence="scopeSequence"
+        :prompt-generation-gate="promptGenerationGate"
+        :prepare-prompt-generation="preparePromptGeneration"
         @getData="getGenerateData" />
     </div>
   </div>
@@ -78,6 +86,7 @@ import promptEditor from "@/components/promptEditor.vue";
 import imageListCacheStore from "@/stores/imageListCache";
 import { createGenerationIntentStore } from "@/utils/generationIntent";
 import { createIdempotencyKey } from "@/utils/idempotency";
+import { captureGenerateScope, positiveId, sameGenerateScope, type GenerateScope, type PromptGenerationIntent } from "./utils/scope";
 
 const { project } = storeToRefs(projectStore());
 const episodesId = inject<Ref<number>>("episodesId")!;
@@ -86,7 +95,9 @@ const cacheStore = imageListCacheStore();
 const generationIntents = createGenerationIntentStore<{ videoId: number }>();
 const generateVideoPending = ref(false);
 const promptMutationIntents = new Map<number, { signature: string; key: string }>();
-const promptGenerationIntents = new Map<number, { signature: string; key: string }>();
+const promptSavePromises = new Map<number, { signature: string; promise: Promise<boolean> }>();
+const promptGenerationIntents = new Map<number, PromptGenerationIntent>();
+const promptPending = reactive(new Map<number, { previousJobId?: string; jobId?: string; submitted: boolean }>());
 const persistedTrackPrompts = new Map<number, string>();
 const promptConflictVersions = new Map<number, number>();
 const durationOverrides = useLocalStorage<Record<string, number>>(`toonflow:video-duration-overrides:${userStore().user?.id}:${project.value?.id}:${episodesId.value}`, {});
@@ -103,6 +114,17 @@ const modeOptions = ref<VideoModel>({
 }); // 当前模型配置
 
 const trackList = ref<TrackItem[]>([]); // 轨道列表
+const scopeSequence = ref(0);
+const disposed = ref(false);
+const loadedScope = ref<GenerateScope>();
+const loadError = ref("");
+let loadSequence = 0;
+const currentScope = computed(() => captureGenerateScope(project.value?.id, episodesId.value, scopeSequence.value));
+const scopeReady = computed(() => {
+  const current = currentScope.value;
+  const loaded = loadedScope.value;
+  return current != null && loaded != null && current.sequence === loaded.sequence && current.projectId === loaded.projectId && current.scriptId === loaded.scriptId;
+});
 
 const modelParmas = useLocalStorage<ModelSetting>(`toonflow:video-settings:${userStore().user?.id}:${project.value?.id}:${episodesId.value}`, {
   mode: "",
@@ -207,6 +229,63 @@ const currentTrack = computed({
     trackList.value[activeTrackIndex.value] = val;
   },
 });
+
+const promptGenerationGate = {
+  begin(ids: readonly number[], previousJobIds: ReadonlyMap<number, string | null> = new Map()): boolean {
+    const unique = [...new Set(ids)];
+    if (!unique.length || unique.some((id) => promptPending.has(id))) return false;
+    unique.forEach((id) => {
+      const previousJobId = previousJobIds.get(id);
+      promptPending.set(id, { previousJobId: previousJobId ?? undefined, submitted: false });
+    });
+    return true;
+  },
+  markSubmitted(id: number): void {
+    const pending = promptPending.get(id);
+    if (pending) pending.submitted = true;
+  },
+  noteJob(id: number, jobId: unknown): void {
+    const pending = promptPending.get(id);
+    if (pending && typeof jobId === "string" && jobId) pending.jobId = jobId;
+  },
+  isPending(id: number): boolean { return promptPending.has(id); },
+  pendingInfo(id: number) { return promptPending.get(id); },
+  getIntent(id: number) { return promptGenerationIntents.get(id); },
+  setIntent(id: number, intent: PromptGenerationIntent) { promptGenerationIntents.set(id, intent); },
+  finish(id: number, retainIntent = false): void {
+    promptPending.delete(id);
+    if (!retainIntent) promptGenerationIntents.delete(id);
+  },
+  clear(): void {
+    promptPending.clear();
+    promptGenerationIntents.clear();
+  },
+};
+const currentPromptPending = computed(() => {
+  const id = positiveId(currentTrack.value?.id);
+  return id != null && promptGenerationGate.isPending(id);
+});
+
+watch(
+  () => [project.value?.id, episodesId.value],
+  () => {
+    scopeSequence.value += 1;
+    loadSequence += 1;
+    loadedScope.value = undefined;
+    loadError.value = "";
+    activeTrackIndex.value = 0;
+    trackList.value = [];
+    storyboardList.value = [];
+    persistedTrackPrompts.clear();
+    promptConflictVersions.clear();
+    promptMutationIntents.clear();
+    promptSavePromises.clear();
+    promptGenerationGate.clear();
+    const nextScope = captureGenerateScope(project.value?.id, episodesId.value, scopeSequence.value);
+    if (nextScope && !disposed.value) void getGenerateData();
+  },
+  { immediate: true },
+);
 
 /** 将时长限制在模型支持的范围内 */
 function clampDuration(trackDuration: number): number {
@@ -335,35 +414,53 @@ const references = computed(() => {
 });
 
 async function getGenerateData() {
-  const { data } = await axios.post("/production/workbench/getGenerateData", {
-    projectId: project.value?.id,
-    scriptId: episodesId.value ?? 0,
-  });
-
-  storyboardList.value = data.storyboardList;
-  // 优先使用本地缓存，没有缓存则用后端数据并写入缓存
-  const pid = project.value?.id;
-  const sid = episodesId.value;
-  if (pid != null && sid != null) {
-    // 先将没有缓存的轨道写入缓存（保留已有本地编辑）
-    initCacheFromTrackList(pid, sid, data.trackList);
-    // 批量向后端请求文件路径对应的完整 URL
-    await warmUpUrls(pid, sid);
-    // 将本地缓存回写到 trackList，确保优先使用缓存数据（src 已解析为完整 URL）
-    data.trackList.forEach((track: TrackItem) => {
-      if (track.id == null) return;
-      const cached = getCache(pid, sid, track.id);
-      if (cached?.length) {
-        track.medias = cached as unknown as TrackMedia[];
-      }
-    });
-    // 整体赋值触发响应式
-    trackList.value = [...data.trackList];
-    persistedTrackPrompts.clear();
-    promptConflictVersions.clear();
-    trackList.value.forEach((track) => persistedTrackPrompts.set(track.id, track.prompt ?? ""));
+  const scope = currentScope.value;
+  if (!scope || disposed.value) return;
+  const requestSequence = ++loadSequence;
+  loadError.value = "";
+  try {
+    await loadGenerateData(scope, requestSequence);
+  } catch {
+    if (requestSequence !== loadSequence || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+    loadedScope.value = undefined;
+    loadError.value = "片段数据加载失败，请重新加载后再生成。";
   }
+}
 
+async function loadGenerateData(scope: GenerateScope, requestSequence: number) {
+  const previousTrackId = positiveId(currentTrack.value?.id);
+  const { data } = await axios.post("/production/workbench/getGenerateData", {
+    projectId: scope.projectId,
+    scriptId: scope.scriptId,
+  });
+  if (requestSequence !== loadSequence || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+
+  if (!Array.isArray(data?.storyboardList) || !Array.isArray(data?.trackList) || data.trackList.some((track: TrackItem) => positiveId(track.id) == null)) throw new Error("片段数据格式无效");
+  const storyboardData = data.storyboardList;
+  const trackData: TrackItem[] = data.trackList.map((track: TrackItem) => ({ ...track, id: positiveId(track.id)! }));
+  // 优先使用本地缓存，没有缓存则用后端数据并写入缓存
+  initCacheFromTrackList(scope.projectId, scope.scriptId, trackData);
+  await warmUpUrls(scope.projectId, scope.scriptId);
+  if (requestSequence !== loadSequence || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+  // 将本地缓存回写到 trackList，确保优先使用缓存数据（src 已解析为完整 URL）
+  trackData.forEach((track: TrackItem) => {
+    const trackId = track.id;
+    if (trackId == null) return;
+    const cached = getCache(scope.projectId, scope.scriptId, trackId);
+    if (cached?.length) track.medias = cached as unknown as TrackMedia[];
+  });
+  if (requestSequence !== loadSequence || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+  storyboardList.value = storyboardData;
+  trackList.value = [...trackData];
+  const nextIndex = previousTrackId == null ? -1 : trackList.value.findIndex((track) => positiveId(track.id) === previousTrackId);
+  activeTrackIndex.value = nextIndex >= 0 ? nextIndex : Math.min(activeTrackIndex.value, Math.max(0, trackList.value.length - 1));
+  loadedScope.value = scope;
+  persistedTrackPrompts.clear();
+  promptConflictVersions.clear();
+  trackList.value.forEach((track) => {
+    const trackId = positiveId(track.id);
+    if (trackId != null) persistedTrackPrompts.set(trackId, track.prompt ?? "");
+  });
   syncCurrentDuration();
 }
 /** 提示词失焦时保存到后端 */
@@ -378,56 +475,90 @@ function handleDurationUpdated(update: { trackId: number; version: number }) {
   }
 }
 
-async function handlePromptBlur() {
-  const track = trackList.value[activeTrackIndex.value];
-  if (track?.id == null) return;
-  if (!Number.isSafeInteger(track.version) || track.version! < 0) {
+function saveTrackPrompt(track: TrackItem, scope: GenerateScope): Promise<boolean> {
+  if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return Promise.resolve(false);
+  const trackId = positiveId(track.id);
+  if (trackId == null || !Number.isSafeInteger(track.version) || track.version! < 0) {
     window.$message.error("轨道版本尚未加载，请刷新后重试");
-    return;
+    return Promise.resolve(false);
   }
   const prompt = track.prompt ?? "";
-  if (persistedTrackPrompts.get(track.id) === prompt && !promptMutationIntents.has(track.id)) return;
-  if (promptConflictVersions.get(track.id) === track.version) {
+  if (persistedTrackPrompts.get(trackId) === prompt && !promptMutationIntents.has(trackId)) return Promise.resolve(true);
+  if (promptConflictVersions.get(trackId) === track.version) {
     window.$message.error("轨道版本已冲突，已保留当前提示词，请先刷新");
-    return;
+    return Promise.resolve(false);
   }
   const payload = {
-    id: track.id,
-    projectId: project.value?.id,
-    scriptId: episodesId.value,
+    id: trackId,
+    projectId: scope.projectId,
+    scriptId: scope.scriptId,
     prompt,
     expectedVersion: track.version,
   };
   const signature = JSON.stringify(payload);
-  const previous = promptMutationIntents.get(track.id);
+  const existing = promptSavePromises.get(trackId);
+  if (existing?.signature === signature) return existing.promise;
+  const previous = promptMutationIntents.get(trackId);
   const intent = previous?.signature === signature ? previous : { signature, key: createIdempotencyKey("track-prompt") };
-  promptMutationIntents.set(track.id, intent);
-  try {
-    const response: any = await axios.post("/production/workbench/updateVideoPrompt", { ...payload, idempotencyKey: intent.key });
-    if (track.version === payload.expectedVersion && Number.isSafeInteger(Number(response.version))) track.version = Number(response.version);
-    persistedTrackPrompts.set(track.id, prompt);
-    promptConflictVersions.delete(track.id);
-    promptMutationIntents.delete(track.id);
-  } catch (error: any) {
-    const status = Number(error?.status);
-    if (status === 409) {
-      promptConflictVersions.set(track.id, Number(payload.expectedVersion));
-      window.$message.error("轨道已被其他成员修改，已保留当前提示词，请刷新后再确认");
+  promptMutationIntents.set(trackId, intent);
+  const promise = (async () => {
+    try {
+      const response: any = await axios.post("/production/workbench/updateVideoPrompt", { ...payload, idempotencyKey: intent.key });
+      if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
+      const target = trackList.value.find((item) => positiveId(item.id) === trackId);
+      if (target !== track) return false;
+      if (track.version === payload.expectedVersion && Number.isSafeInteger(Number(response.version))) track.version = Number(response.version);
+      persistedTrackPrompts.set(trackId, prompt);
+      promptConflictVersions.delete(trackId);
+      promptMutationIntents.delete(trackId);
+      return true;
+    } catch (error: any) {
+      if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
+      const status = Number(error?.status);
+      if (status === 409) {
+        promptConflictVersions.set(trackId, Number(payload.expectedVersion));
+        window.$message.error("轨道已被其他成员修改，已保留当前提示词，请刷新后再确认");
+      } else window.$message.error(error?.message ?? "轨道提示词保存失败");
+      if (Number.isSafeInteger(status) && status < 500) promptMutationIntents.delete(trackId);
+      return false;
     }
-    else window.$message.error(error?.message ?? "轨道提示词保存失败");
-    if (Number.isSafeInteger(status) && status < 500) promptMutationIntents.delete(track.id);
-  }
+  })();
+  promptSavePromises.set(trackId, { signature, promise });
+  void promise.finally(() => {
+    if (promptSavePromises.get(trackId)?.promise === promise) promptSavePromises.delete(trackId);
+  });
+  return promise;
+}
+
+async function handlePromptBlur() {
+  const scope = currentScope.value;
+  const track = trackList.value[activeTrackIndex.value];
+  if (!scope || !track || track.id == null) return;
+  await saveTrackPrompt(track, scope);
+}
+
+async function preparePromptGeneration(trackIds: readonly number[], scope: GenerateScope): Promise<boolean> {
+  if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
+  const tracks = trackList.value.filter((track) => {
+    const id = positiveId(track.id);
+    return id != null && trackIds.includes(id);
+  });
+  const results = await Promise.all(tracks.map((track) => saveTrackPrompt(track, scope)));
+  return results.length === trackIds.length && results.every(Boolean) && sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value);
 }
 
 /** 单个轨道生成提示词 */
 async function genText() {
+  const scope = currentScope.value;
   const track = currentTrack.value;
-  if (track.id == null || track.state === "生成中") return;
+  const currentTrackId = positiveId(track?.id);
+  if (!scope || !scopeReady.value || !track || currentTrackId == null || track.state === "生成中") return;
+  const previousJobId = typeof track.promptJobId === "string" ? track.promptJobId : undefined;
+  if (!promptGenerationGate.begin([currentTrackId], new Map([[currentTrackId, previousJobId ?? null]]))) return;
   let info: { id: number; sources: string; fileType?: string }[] = [];
-  const currentTrackId = track.id;
   const rawMedias = (track.medias ?? []) as UploadItem[];
   if (modelParmas.value.mode == "text") {
-    info = rawMedias.map(({ id, sources, fileType }) => ({ id: id!, sources, fileType }));
+    info = []; // Text-to-video sends no visual references; source storyboards remain server-side.
   } else {
     const frameMode = ["startEndRequired", "endFrameOptional", "startFrameOptional"];
     const preSliced = frameMode.includes(modelParmas.value.mode)
@@ -436,33 +567,49 @@ async function genText() {
         ? rawMedias.slice(0, 1)
         : rawMedias;
     const filtered = preSliced
-      .filter((item) => typeof item.id === "number" && !isNaN(item.id))
+      .filter((item) => positiveId(item.id) != null)
       .map(({ id, sources, fileType }) => ({ id: id!, sources, fileType }));
     if (frameMode.includes(modelParmas.value.mode)) info = filtered.slice(0, 2);
     else if (modelParmas.value.mode === "singleImage") info = filtered.slice(0, 1);
     else info = filtered;
   }
+  const saved = await saveTrackPrompt(track, scope);
+  if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+  if (!saved) {
+    promptGenerationGate.finish(currentTrackId);
+    return;
+  }
   track.state = "生成中";
   track.promptJobId = null;
-  const promptPayload = { projectId: project.value?.id, scriptId: episodesId.value, trackId: currentTrackId, info, model: modelParmas.value.model, mode: modelParmas.value.mode, expectedVersion: track.version };
+  const promptPayload = { projectId: scope.projectId, scriptId: scope.scriptId, trackId: currentTrackId, info, model: modelParmas.value.model, mode: modelParmas.value.mode, expectedVersion: track.version };
   const promptSignature = JSON.stringify(promptPayload);
   const previousIntent = promptGenerationIntents.get(currentTrackId);
-  const promptIntent = previousIntent?.signature === promptSignature ? previousIntent : { signature: promptSignature, key: createIdempotencyKey("video-prompt") };
+  const promptIntent = previousIntent?.signature === promptSignature ? previousIntent : { signature: promptSignature, key: createIdempotencyKey("video-prompt"), startedAt: Date.now() };
   promptGenerationIntents.set(currentTrackId, promptIntent);
   try {
-    const { data } = await axios.post("/production/workbench/generateVideoPrompt", { ...promptPayload, idempotencyKey: promptIntent.key });
+    promptGenerationGate.markSubmitted(currentTrackId);
+    const response: any = await axios.post("/production/workbench/generateVideoPrompt", { ...promptPayload, idempotencyKey: promptIntent.key });
+    const { data } = response;
+    if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+    const target = trackList.value.find((item) => item.id === currentTrackId);
+    if (target !== track) return;
     if (data && typeof data === "object" && (data.state === "running" || data.state === "queued")) {
-      track.promptJobId = data.jobId ?? null;
+      promptIntent.jobId = data.jobId ?? undefined;
+      promptGenerationGate.noteJob(currentTrackId, promptIntent.jobId);
+      track.promptJobId = promptIntent.jobId ?? null;
       return;
     }
     track.prompt = data;
     track.state = "已完成";
-    promptGenerationIntents.delete(currentTrackId);
+    if (Number.isSafeInteger(response.version) && response.version >= Number(track.version ?? 0)) track.version = response.version;
+    persistedTrackPrompts.set(currentTrackId, data ?? "");
+    promptGenerationGate.finish(currentTrackId);
   } catch (e) {
+    if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     track.state = "生成失败";
     window.$message.error((e as Error)?.message ?? "提示词生成失败");
     const status = Number((e as any)?.status ?? (e as any)?.response?.status);
-    if (Number.isSafeInteger(status) && status < 500) promptGenerationIntents.delete(currentTrackId);
+    promptGenerationGate.finish(currentTrackId, !(Number.isSafeInteger(status) && status < 500));
   }
 }
 function trackChange(prevIndex?: number) {
@@ -509,7 +656,6 @@ watch(
 onMounted(() => {
   if (!modelParmas.value.model) modelParmas.value.model = project.value?.videoModel || "";
   if (!modelParmas.value.mode) modelParmas.value.mode = project.value?.mode || "";
-  getGenerateData();
   if (hasGenerateVideoIds.value && hasGenerateVideoIds.value.length) {
     startPoll();
   }
@@ -608,15 +754,19 @@ const hasGenerateVideoIds = computed(() => {
 const hasGeneratePromptIds = computed(() => {
   // Poll every loaded track so a prompt job started by another session is
   // reflected here even when this tab never observed its queued state.
-  return trackList.value.map((track) => track.id);
+  return trackList.value.map((track) => positiveId(track.id)).filter((id): id is number => id != null);
 });
 /** 查询所有视频列表，并检测生成完成/失败状态 */
 async function getVideoList() {
+  const scope = currentScope.value;
+  const videoIds = hasGenerateVideoIds.value.map((id) => positiveId(id)).filter((id): id is number => id != null);
+  if (!scope || !scopeReady.value || disposed.value || !videoIds.length) return;
   const { data } = await axios.post("/production/workbench/checkVideoStateList", {
-    projectId: project.value?.id,
-    scriptId: episodesId.value ?? 0,
-    videoIds: hasGenerateVideoIds.value,
+    projectId: scope.projectId,
+    scriptId: scope.scriptId,
+    videoIds,
   });
+  if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
   if (data && data.length) {
     data.forEach((item: { id: number; state: "生成中" | "未生成" | "已完成" | "生成失败"; src?: string; errorReason?: string }) => {
       for (const track of trackList.value) {
@@ -645,44 +795,51 @@ function stopPromptPoll() {
 /** 查询所有视频列表，并检测生成完成/失败状态 */
 let promptPollInFlight = false;
 async function getTrackPromptList() {
-  if (promptPollInFlight || !hasGeneratePromptIds.value.length) return;
+  const scope = currentScope.value;
+  if (promptPollInFlight || !scope || !scopeReady.value || disposed.value || !hasGeneratePromptIds.value.length) return;
   const requestedIds = new Set(hasGeneratePromptIds.value);
+  const jobIds = trackList.value.filter((track) => track.state === "生成中" && track.promptJobId).map((track) => track.promptJobId!);
   promptPollInFlight = true;
   try {
     const { data } = await axios.post("/production/workbench/checkVideoPrompt", {
-      projectId: project.value?.id,
-      scriptId: episodesId.value ?? 0,
+      projectId: scope.projectId,
+      scriptId: scope.scriptId,
       trackIds: [...requestedIds],
-      jobIds: trackList.value.filter((track) => track.state === "生成中" && track.promptJobId).map((track) => track.promptJobId),
+      jobIds,
     });
+    if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     if (Array.isArray(data)) {
       const returnedIds = new Set<number>();
-      data.forEach((item: { id: number; jobId?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number }) => {
+      data.forEach((item: { id: number; jobId?: string; idempotencyKey?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number }) => {
         const findData = trackList.value.find((t) => t.id == item.id);
         returnedIds.add(Number(item.id));
         if (findData) {
+          const findId = positiveId(findData.id);
+          if (findId == null) return;
           const remoteVersion = Number(item.version);
           const localVersion = Number(findData.version ?? 0);
           // A save may have completed while this read was in flight.
           if (Number.isSafeInteger(remoteVersion) && remoteVersion < localVersion) return;
           const previousState = findData.state;
           const previousJobId = findData.promptJobId;
-          const localDraft = findData.prompt !== (persistedTrackPrompts.get(findData.id) ?? "");
+          const localDraft = findData.prompt !== (persistedTrackPrompts.get(findId) ?? "");
+          const pending = promptPending.get(findId);
+          const submittedIntent = promptGenerationIntents.get(findId);
+          if (pending?.submitted && item.jobId && item.idempotencyKey === submittedIntent?.key) pending.jobId = item.jobId;
+          if (pending && (!pending.submitted || !pending.jobId || pending.jobId !== item.jobId)) return;
           if (item.jobId) findData.promptJobId = item.jobId;
+          const terminal = item.state === "已完成" || item.state === "生成失败";
           if (findData.state !== item.state) findData.state = item.state;
           if ((item.state === "已完成" || item.state === "生成中") && !localDraft && item.prompt !== findData.prompt) findData.prompt = item?.prompt ?? "";
           const remoteVersionChanged = Number.isSafeInteger(remoteVersion) && remoteVersion >= 0 && findData.version !== remoteVersion;
-          if (item.prompt != null && (item.state === "已完成" || item.state === "生成失败") && !localDraft) persistedTrackPrompts.set(findData.id, item.prompt);
+          if (item.prompt != null && (item.state === "已完成" || item.state === "生成失败") && !localDraft) persistedTrackPrompts.set(findId, item.prompt);
           if (remoteVersionChanged && localDraft) {
             // Keep the local draft anchored to its original version. Advancing it
             // would let the next blur overwrite a newer remote edit.
             promptConflictVersions.set(findData.id, localVersion);
           } else if (remoteVersionChanged) findData.version = remoteVersion;
           if (findData.reason !== (item?.reason ?? "")) findData.reason = item?.reason ?? "";
-          if (item.state === "已完成" || item.state === "生成失败") {
-            const intent = promptGenerationIntents.get(findData.id);
-            if (intent) promptGenerationIntents.delete(findData.id);
-          }
+          if (terminal && (pending || (submittedIntent && item.idempotencyKey === submittedIntent.key))) promptGenerationGate.finish(findId);
           if (item.state === "生成失败" && (previousState !== "生成失败" || previousJobId !== item.jobId) && (item.jobId || previousState === "生成中")) {
             window.$message.error(`提示词生成失败，${item.reason ?? "未知原因"}`);
           }
@@ -693,6 +850,7 @@ async function getTrackPromptList() {
         const deleted = new Set(deletedIds.map(Number));
         trackList.value = trackList.value.filter((track) => !deleted.has(Number(track.id)));
         deletedIds.forEach((id) => {
+          if (promptGenerationGate.isPending(id)) return;
           persistedTrackPrompts.delete(id);
           promptMutationIntents.delete(id);
           promptGenerationIntents.delete(id);
@@ -723,12 +881,17 @@ watch(
   },
 );
 onUnmounted(() => {
+  disposed.value = true;
   stopPoll();
   stopPromptPoll();
 });
 </script>
 
 <style lang="scss" scoped>
+.scopeNotice {
+  color: var(--td-text-color-secondary);
+  padding: 8px 0;
+}
 .index {
   height: calc(100vh - 120px);
   gap: 16px;

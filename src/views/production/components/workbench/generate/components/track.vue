@@ -8,10 +8,10 @@
         </div>
         <div class="right f ac">
           <t-button size="small" variant="outline" :disabled="!checkedTrackIds.length" @click="batchDownloadVideo">{{ $t("workbench.generate.batchDownloadVideo") }}</t-button>
-          <t-button size="small" variant="outline" :disabled="!checkedTrackIds.length" @click="batchGenText" :loading="generateTextLoad">
+          <t-button size="small" variant="outline" :disabled="!scopeReady || !checkedTrackIds.length || hasPendingPrompt || generateTextLoad" @click="batchGenText" :loading="generateTextLoad">
             {{ $t("workbench.generate.batchGenerateText") }}
           </t-button>
-          <t-button size="small" variant="outline" :disabled="!checkedTrackIds.length" @click="batchGenVideo" :loading="generateVideoLoad">
+          <t-button size="small" variant="outline" :disabled="!scopeReady || !checkedTrackIds.length || generateVideoLoad" @click="batchGenVideo" :loading="generateVideoLoad">
             {{ $t("workbench.generate.batchGenerateVideo") }}
           </t-button>
           <!-- <t-button size="small" variant="outline" @click="importVideo">{{ $t("workbench.generate.importVideo") }}</t-button> -->
@@ -81,11 +81,11 @@ import JSZip from "jszip";
 import settingStore from "@/stores/setting";
 import { createGenerationIntentStore, shouldRetainGenerationIntent } from "@/utils/generationIntent";
 import { createIdempotencyKey } from "@/utils/idempotency";
+import { captureGenerateScope, positiveId, sameGenerateScope, validTrackIds, type PromptGenerationIntent } from "../utils/scope";
 
 const { otherSetting } = storeToRefs(settingStore());
 const generationIntents = createGenerationIntentStore();
 const batchRequestIntents = createGenerationIntentStore<Array<{ videoId: number; trackId: number; jobId?: string; reused?: boolean }>>();
-const promptGenerationIntents = new Map<number, { signature: string; key: string }>();
 const { project } = storeToRefs(projectStore());
 const { removeCache } = imageListCacheStore();
 const episodesId = inject<Ref<number>>("episodesId")!;
@@ -97,6 +97,18 @@ const props = defineProps<{
   sourceDuration: (track: TrackItem | undefined) => number;
   resolveDuration: (trackDuration: number) => { requested: number; duration?: number; resolution: string };
   supportsResolution: (duration: number) => boolean;
+  scopeReady: boolean;
+  scopeSequence: number;
+  promptGenerationGate: {
+    begin: (ids: readonly number[], previousJobIds?: ReadonlyMap<number, string | null>) => boolean;
+    markSubmitted: (id: number) => void;
+    noteJob: (id: number, jobId: unknown) => void;
+    isPending: (id: number) => boolean;
+    getIntent: (id: number) => PromptGenerationIntent | undefined;
+    setIntent: (id: number, intent: PromptGenerationIntent) => void;
+    finish: (id: number, retainIntent?: boolean) => void;
+  };
+  preparePromptGeneration: (ids: readonly number[], scope: { projectId: number; scriptId: number; sequence: number }) => Promise<boolean>;
 }>();
 const activeTrackIndex = defineModel("activeTrackIndex", {
   default: 0,
@@ -113,6 +125,18 @@ const emit = defineEmits<{
 const checkAll = ref(false); // 全选状态
 const deleteTrackIntents = new Map<number, { version: number; key: string }>();
 const createTrackIntent = ref<{ signature: string; key: string }>();
+const disposed = ref(false);
+let batchSequence = 0;
+const hasPendingPrompt = computed(() => checkedTrackIds.value.some((id) => props.promptGenerationGate.isPending(id)));
+
+watch(
+  () => props.scopeSequence,
+  () => {
+    batchSequence += 1;
+    checkedTrackIds.value = [];
+    checkAll.value = false;
+  },
+);
 
 function retainMutationIntent(error: any): boolean {
   const status = Number(error?.status);
@@ -304,70 +328,96 @@ async function batchDownloadVideo(): Promise<void> {
   checkAll.value = false;
 }
 const generateTextLoad = ref(false);
-function batchGenText() {
-  if (generateTextLoad.value) return;
-  generateTextLoad.value = true;
+async function batchGenText() {
+  const scope = captureGenerateScope(project.value?.id, episodesId.value, props.scopeSequence);
+  if (generateTextLoad.value || !props.scopeReady || !scope || disposed.value) return;
+  const requestSequence = ++batchSequence;
   const trackData: any[] = [];
-  trackList.value.forEach((track, index) => {
-    if (!checkedTrackIds.value.includes(track.id)) return;
-    const trackId = track.id;
-    let info = [];
+  const selectedIds = validTrackIds(checkedTrackIds.value, trackList.value);
+  checkedTrackIds.value = selectedIds;
+  if (!selectedIds.length) {
+    generateTextLoad.value = false;
+    return;
+  }
+  const previousJobIds = new Map(selectedIds.map((id) => [id, trackList.value.find((track) => positiveId(track.id) === id)?.promptJobId ?? null]));
+  if (!props.promptGenerationGate.begin(selectedIds, previousJobIds)) return;
+  generateTextLoad.value = true;
+  const prepared = await props.preparePromptGeneration(selectedIds, scope);
+  if (!sameGenerateScope(scope, project.value?.id, episodesId.value, props.scopeSequence, disposed.value)) return;
+  if (!prepared) {
+    selectedIds.forEach((id) => props.promptGenerationGate.finish(id));
+    if (!disposed.value && requestSequence === batchSequence) generateTextLoad.value = false;
+    return;
+  }
+  trackList.value.forEach((track) => {
+    const trackId = positiveId(track.id);
+    if (trackId == null || !selectedIds.includes(trackId)) return;
+    let info: ReturnType<typeof getTrackUploadInfo> = [];
     if (props.modelParmas.mode == "text") {
-      info = track?.medias.map(({ id, sources, fileType }) => ({ id, sources, fileType }));
+      info = []; // Match the actual text-to-video request.
     } else {
       info = getTrackUploadInfo(track);
     }
     trackData.push({
       trackId,
-      info: info.filter((i) => typeof i.id === "number" && !isNaN(i.id)),
+      info: info.filter((i) => positiveId(i.id) != null),
       idempotencyKey: "pending",
     });
     track.state = "生成中";
   });
   trackData.forEach((item) => {
-    const track = trackList.value.find((candidate) => candidate.id === item.trackId);
-    const signature = JSON.stringify({ projectId: project.value?.id, scriptId: episodesId.value, model: props.modelParmas.model, mode: props.modelParmas.mode, trackId: item.trackId, info: item.info, expectedVersion: track?.version });
-    const previous = promptGenerationIntents.get(item.trackId);
-    const intent = previous?.signature === signature ? previous : { signature, key: createIdempotencyKey("batch-video-prompt") };
-    promptGenerationIntents.set(item.trackId, intent);
+    const track = trackList.value.find((candidate) => positiveId(candidate.id) === item.trackId);
+    const signature = JSON.stringify({ projectId: scope.projectId, scriptId: scope.scriptId, model: props.modelParmas.model, mode: props.modelParmas.mode, trackId: item.trackId, info: item.info, expectedVersion: track?.version });
+    const previous = props.promptGenerationGate.getIntent(item.trackId);
+    const intent = previous?.signature === signature ? previous : { signature, key: createIdempotencyKey("batch-video-prompt"), startedAt: Date.now() };
+    props.promptGenerationGate.setIntent(item.trackId, intent);
     item.idempotencyKey = intent.key;
   });
-  const selectedIds = new Set(trackData.map((item) => item.trackId));
-  axios
-    .post("/production/workbench/batchGeneratePrompt", {
-      projectId: project.value?.id,
-      scriptId: episodesId.value,
+  try {
+    if (!sameGenerateScope(scope, project.value?.id, episodesId.value, props.scopeSequence, disposed.value)) return;
+    selectedIds.forEach((id) => props.promptGenerationGate.markSubmitted(id));
+    const { data } = await axios.post("/production/workbench/batchGeneratePrompt", {
+      projectId: scope.projectId,
+      scriptId: scope.scriptId,
       trackData,
       model: props.modelParmas.model,
       mode: props.modelParmas.mode,
       concurrentCount: otherSetting.value.assetsBatchGenereateSize,
-    })
-    .then(({ data }) => {
-      if (Array.isArray(data)) {
-        data.forEach((item: { trackId: number; jobId?: string | null; state?: string; reason?: string | null }) => {
-          const track = trackList.value.find((candidate) => candidate.id === item.trackId);
-          if (!track) return;
-          track.promptJobId = item.jobId ?? null;
-          if (item.state === "failed") {
-            track.state = "生成失败";
-            track.reason = item.reason ?? "提示词任务预校验失败";
-            promptGenerationIntents.delete(track.id);
-          }
-        });
-      }
-      window.$message.success("开始生成提示词");
-      generateTextLoad.value = false;
-      checkedTrackIds.value = [];
-      checkAll.value = false;
-    })
-    .catch((e) => {
+    });
+    if (!sameGenerateScope(scope, project.value?.id, episodesId.value, props.scopeSequence, disposed.value)) return;
+    if (Array.isArray(data)) {
+      data.forEach((item: { trackId: number; jobId?: string | null; state?: string; reason?: string | null }) => {
+        const track = trackList.value.find((candidate) => positiveId(candidate.id) === item.trackId);
+        if (!track) return;
+        const trackId = positiveId(track.id);
+        if (trackId == null) return;
+        const intent = props.promptGenerationGate.getIntent(trackId);
+        props.promptGenerationGate.noteJob(trackId, item.jobId);
+        if (intent) intent.jobId = item.jobId ?? undefined;
+        track.promptJobId = item.jobId ?? null;
+        if (item.state === "failed") {
+          track.state = "生成失败";
+          track.reason = item.reason ?? "提示词任务预校验失败";
+          props.promptGenerationGate.finish(trackId);
+        }
+      });
+    }
+    window.$message.success("开始生成提示词");
+    checkedTrackIds.value = [];
+    checkAll.value = false;
+  } catch (e: any) {
+    if (sameGenerateScope(scope, project.value?.id, episodesId.value, props.scopeSequence, disposed.value)) {
       window.$message.error(e?.message ?? "生成提示词失败");
-      trackList.value.filter((track) => selectedIds.has(track.id)).forEach((track) => {
+      trackList.value.filter((track) => selectedIds.includes(positiveId(track.id) ?? -1)).forEach((track) => {
         track.state = "生成失败";
         track.reason = e?.message ?? "批量请求失败";
       });
-      generateTextLoad.value = false;
-    });
+      const status = Number(e?.status ?? e?.response?.status);
+      selectedIds.forEach((id) => props.promptGenerationGate.finish(id, !(Number.isSafeInteger(status) && status < 500)));
+    }
+  } finally {
+    if (!disposed.value && requestSequence === batchSequence) generateTextLoad.value = false;
+  }
 }
 /**
  * 获取指定轨道的上传数据：
@@ -393,14 +443,18 @@ function getTrackUploadInfo(track: TrackItem, filterEmpty = false) {
 const generateVideoLoad = ref(false);
 /** 批量为已勾选轨道生成视频 */
 function batchGenVideo() {
-  if (generateVideoLoad.value) return;
+  if (generateVideoLoad.value || !props.scopeReady || disposed.value) return;
   const dlg = DialogPlugin.confirm({
     header: $t("workbench.generate.generateConfirm"),
     body: $t("workbench.generate.generateVideosInBatches"),
     onConfirm: async () => {
       dlg.destroy();
+      const scope = captureGenerateScope(project.value?.id, episodesId.value, props.scopeSequence);
+      if (!scope || !props.scopeReady || disposed.value) return;
 
-      const checkedTrackData = trackList.value.filter((track) => checkedTrackIds.value.includes(track.id));
+      const selectedIds = validTrackIds(checkedTrackIds.value, trackList.value);
+      checkedTrackIds.value = selectedIds;
+      const checkedTrackData = trackList.value.filter((track) => selectedIds.includes(positiveId(track.id) ?? -1));
       const notHasPrompt = checkedTrackData.filter((i) => !i.prompt);
       if (notHasPrompt.length) return window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
       generateVideoLoad.value = true;
@@ -420,8 +474,8 @@ function batchGenVideo() {
           uploadData,
           trackId,
         };
-        const scope = `batch-track:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${String(trackId)}`;
-        const intent = generationIntents.getOrCreate(scope, intentPayload);
+        const intentScope = `batch-track:${scope.projectId}:${scope.scriptId}:${String(trackId)}`;
+        const intent = generationIntents.getOrCreate(intentScope, intentPayload);
         return {
           ...intentPayload,
           idempotencyKey: intent.key,
@@ -438,15 +492,15 @@ function batchGenVideo() {
         return;
       }
       const requestData = {
-        projectId: project.value?.id,
-        scriptId: episodesId.value,
+        projectId: scope.projectId,
+        scriptId: scope.scriptId,
         model: props.modelParmas.model,
         mode: props.modelParmas.mode,
         resolution: props.modelParmas.resolution,
         audio: Boolean(props.modelParmas.audio),
         trackData,
       };
-      const batchScope = `batch-request:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${checkedTrackData
+      const batchScope = `batch-request:${scope.projectId}:${scope.scriptId}:${checkedTrackData
         .map((track) => track.id)
         .sort((a, b) => a - b)
         .join(",")}`;
@@ -455,10 +509,13 @@ function batchGenVideo() {
           const response = await axios.post("/production/workbench/batchGenerateVideo", requestData);
           return response.data;
         });
+        if (!sameGenerateScope(scope, project.value?.id, episodesId.value, props.scopeSequence, disposed.value)) return;
         checkedTrackData.forEach((track) => {
-          const scope = `batch-track:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${String(track.id)}`;
+          const trackId = positiveId(track.id);
+          if (trackId == null) return;
+          const intentScope = `batch-track:${scope.projectId}:${scope.scriptId}:${String(trackId)}`;
           const payload = trackData.find((item) => item.trackId === track.id);
-          if (payload) generationIntents.markSuccess(scope, payload.idempotencyKey);
+          if (payload) generationIntents.markSuccess(intentScope, payload.idempotencyKey);
         });
         const videoRecordId: Record<number, number> = {};
         data.forEach((item: { videoId: number; trackId: number }) => {
@@ -493,7 +550,7 @@ function batchGenVideo() {
 
 /** 全选 / 取消全选轨道 */
 function handleCheckAll(val: boolean) {
-  const allIds = trackList.value.map((t) => t.id).filter((id): id is number => id != null);
+  const allIds = trackList.value.map((t) => positiveId(t.id)).filter((id): id is number => id != null);
   checkedTrackIds.value = val ? allIds : [];
 }
 
@@ -505,7 +562,7 @@ function toggleCheck(trackId: number | undefined, val: boolean) {
   } else {
     checkedTrackIds.value = checkedTrackIds.value.filter((id) => id !== trackId);
   }
-  const allIds = trackList.value.map((t) => t.id).filter((id): id is number => id != null);
+  const allIds = trackList.value.map((t) => positiveId(t.id)).filter((id): id is number => id != null);
   checkAll.value = allIds.length > 0 && allIds.every((id) => checkedTrackIds.value.includes(id));
 }
 
@@ -513,9 +570,9 @@ function toggleCheck(trackId: number | undefined, val: boolean) {
 watch(
   () => trackList.value.map((track) => track.id),
   (ids) => {
-    const available = new Set(ids);
+    const available = new Set(ids.map(positiveId).filter((id): id is number => id != null));
     checkedTrackIds.value = checkedTrackIds.value.filter((id) => available.has(id));
-    checkAll.value = ids.length > 0 && ids.every((id) => checkedTrackIds.value.includes(id));
+    checkAll.value = available.size > 0 && [...available].every((id) => checkedTrackIds.value.includes(id));
   },
   { immediate: true },
 );
@@ -529,6 +586,9 @@ watch(
   },
   { deep: true, immediate: true },
 );
+onUnmounted(() => {
+  disposed.value = true;
+});
 </script>
 
 <style lang="scss" scoped>
