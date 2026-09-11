@@ -81,5 +81,12 @@ export function createTrustedBindingController(options: {
     current.desired = current.desired.filter(value => trustedItemKey(value) !== trustedItemKey(item));
     if (current.status !== "conflict") void save(scope);
   }
-  return { state, load, save, toggle, remove, dirty };
+  function bindCurrentSource(scope: TrustedTargetScope, item: TrustedBindingItem) {
+    const current = state(scope);
+    if (!current.snapshot?.currentSourceFileHash || current.status !== "saved") return;
+    // Explicit user action after inspecting the current source: replace, never toggle off.
+    current.desired = [bindingInput(item)];
+    void save(scope, true);
+  }
+  return { state, load, save, toggle, remove, dirty, bindCurrentSource };
 }

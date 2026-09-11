@@ -42,3 +42,9 @@ test('remove writes an empty binding set and unsafe preview schemes never enter 
  await controller.load(scope);controller.remove(scope,item('a'));await tick();assert.deepEqual(calls[0].items,[]);
  assert.equal(trustedPreviewUrl('javascript:alert(1)'),'');assert.equal(trustedPreviewUrl('file:///etc/passwd'),'');assert.equal(trustedPreviewUrl('asset://remote-a'),'');assert.equal(trustedPreviewUrl('https://example.test/a.png'),'https://example.test/a.png');
 });
+
+test('explicit binding of an uploaded asset uses the current source even when the previous binding is stale',async()=>{
+ const calls:TrustedBindingWrite[]=[];const current={...snapshot(scope,5,[item('old-remote')]),sourceCurrent:false,currentSourceVersion:8,currentSourceFileHash:'c'.repeat(64)};
+ const {controller}=harness(async input=>{calls.push(input);return {...current,version:6,sourceCurrent:true,items:input.items};},async()=>current);
+ await controller.load(scope);controller.bindCurrentSource(scope,item('uploaded-current'));await tick();assert.equal(calls.length,1);assert.equal(calls[0].expectedSourceVersion,8);assert.deepEqual(calls[0].items,[item('uploaded-current')]);
+});
