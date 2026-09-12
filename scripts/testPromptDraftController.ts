@@ -99,3 +99,10 @@ test("page draft caches are isolated by user and delayed writes cannot run as an
     currentUserId = 801; await first.controller.save("a"); assert.equal(writes, 1);
   } finally { first.controller.dispose(); second.controller.dispose(); }
 });
+
+test("manual mode never submits edits on debounce and only saves the explicit captured draft", async () => {
+  const states: Record<string, PromptDraft> = {}; const calls: PromptMutationInput[]=[];const waiting=deferred<PromptEntry>();
+  const controller=createPromptDraftController({states,autoSave:false,delay:1,makeId:()=>"manual-prompt-key",read:async key=>entry(key),write:async(_op,input)=>{calls.push(input);return waiting.promise;}});
+  try{controller.seed([entry("a")]);controller.edit("a","draft one");await new Promise(resolve=>setTimeout(resolve,12));assert.equal(calls.length,0);const saving=controller.save("a");controller.edit("a","new draft during save");waiting.resolve(entry("a","draft one","v2"));await saving;await new Promise(resolve=>setTimeout(resolve,12));assert.equal(calls.length,1);assert.equal(states.a.draft,"new draft during save");assert.equal(states.a.status,"pending");}
+  finally{controller.dispose();}
+});
