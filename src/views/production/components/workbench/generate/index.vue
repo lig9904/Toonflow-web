@@ -37,7 +37,7 @@
         <t-card :title="currentTrackTitle + ' · ' + $t('workbench.generate.generateText')" header-bordered class="videoPrompt">
           <template #actions>
             <t-tag v-if="currentPromptDirty" size="small" theme="warning">未保存草稿</t-tag>
-            <t-button size="small" variant="outline" :disabled="!currentPromptNeedsSave || currentPromptSaving" :loading="currentPromptSaving" @click="saveCurrentPrompt">{{ currentPromptDirty ? '保存提示词' : '保存并确认参考' }}</t-button>
+            <t-button size="small" variant="outline" :disabled="!currentPromptNeedsSave || currentPromptSaving" :loading="currentPromptSaving" @click="saveCurrentPrompt">{{ currentPromptSaving ? '保存中…' : currentPromptDirty ? '保存提示词' : currentTrack.referencesNeedReview ? '保存并确认参考' : currentTrack.prompt?.trim() ? '已保存' : '未填写' }}</t-button>
             <t-button size="small" class="genTextbtn" :disabled="!scopeReady || !canGenerateStoryboardPrompt(currentTrack, storyboardList) || currentPromptPending || currentTrack.state == '生成中'" :loading="currentPromptPending || currentTrack.state == '生成中'" @click="genText">
               {{ $t("workbench.generate.generateText") }}
             </t-button>
@@ -102,6 +102,7 @@
 <script setup lang="ts">
 import type { Ref } from "vue";
 import VideoPreflightPanel from "@/components/reviews/videoPreflightPanel.vue";
+import { createSavedVideoPromptStore, draftAfterPromptSave } from "@/utils/videoPromptSaveState";
 import { preflightInputKey, acceptPreflightResponse } from "@/utils/videoPreflightState";
 import { inject } from "vue";
 import newTrack from "./components/track.vue";
@@ -150,7 +151,7 @@ const promptMutationIntents = new Map<number, { signature: string; key: string }
 const promptSavePromises = new Map<number, { signature: string; promise: Promise<boolean> }>();
 const promptGenerationIntents = new Map<number, PromptGenerationIntent>();
 const promptPending = reactive(new Map<number, { previousJobId?: string; jobId?: string; submitted: boolean }>());
-const persistedTrackPrompts = new Map<number, string>();
+const persistedTrackPrompts = createSavedVideoPromptStore();
 const promptConflictVersions = new Map<number, number>();
 const promptSavingTrackIds = reactive(new Set<number>());
 const videoPromptDrafts = useLocalStorage<Record<string, VideoPromptDraftRecord | string>>(`toonflow:video-prompt-drafts:${userStore().user?.id}`, {});
@@ -863,11 +864,16 @@ async function saveTrackPrompt(track: TrackItem, scope: GenerateScope, rebased =
       if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
       const target = trackList.value.find((item) => positiveId(item.id) === trackId);
       if (target !== track) return false;
-      if (track.version === payload.expectedVersion && Number.isSafeInteger(Number(response.version))) track.version = Number(response.version);
+      const savedVersion=Number(response.version);
+      if(!Number.isSafeInteger(savedVersion))throw new Error("保存回执缺少版本，请重新核对；草稿仍保留");
+      if(savedVersion<Number(track.version??0)){window.$message.warning("本次保存已完成，但服务器随后有更新；请核对最新版本");return false;}
+      track.version=savedVersion;
       persistedTrackPrompts.set(trackId, prompt);
-      delete videoPromptDrafts.value[promptDraftKey(trackId, scope)];
-      track.promptReferenceRevision = track.modeIntentRevision ?? 0;
-      track.referencesNeedReview = false;
+      const newerDraft=draftAfterPromptSave(track.prompt??"",prompt,{version:savedVersion,modeIntentRevision:payload.modeIntentRevision,savedPrompt:prompt});
+      if(newerDraft)videoPromptDrafts.value[promptDraftKey(trackId,scope)]=newerDraft;
+      else delete videoPromptDrafts.value[promptDraftKey(trackId, scope)];
+      track.promptReferenceRevision = payload.modeIntentRevision;
+      track.referencesNeedReview = shouldReviewReferences(track.prompt,track.promptReferenceRevision,track.modeIntentRevision);
       promptConflictVersions.delete(trackId);
       promptMutationIntents.delete(trackId);
       return true;
@@ -895,7 +901,7 @@ async function saveCurrentPrompt() {
   const scope = currentScope.value;
   const track = trackList.value[activeTrackIndex.value];
   if (!scope || !track || track.id == null) return;
-  await saveTrackPrompt(track, scope);
+  if(await saveTrackPrompt(track, scope))window.$message.success(isPromptDirty(track)?"已保存提交时的内容，之后的新修改仍是草稿":"提示词已保存");
 }
 
 
