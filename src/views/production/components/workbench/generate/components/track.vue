@@ -693,8 +693,6 @@ function batchGenVideo() {
       if (warnBlockedGeneration(blockedGenerationTracks(selectedIds))) return;
       checkedTrackIds.value = selectedIds;
       const checkedTrackData = trackList.value.filter((track) => selectedIds.includes(positiveId(track.id) ?? -1));
-      const notHasPrompt = checkedTrackData.filter((i) => !i.prompt);
-      if (notHasPrompt.length) return window.$message.warning($t("workbench.generate.skipDataWithEmptyVideoPromptWords"));
       const generationSnapshot = captureVideoGenerationSettings(props.modelParmas);
       const durationPlans = new Map(checkedTrackData.map((track) => {
         const sourceDuration = props.sourceDuration(track);
@@ -711,17 +709,13 @@ function batchGenVideo() {
         return;
       }
 
-      const unsupportedTracks: number[] = [];
-      const unsupportedQualityTracks: number[] = [];
       const trackData = checkedTrackData.map((track) => {
         const trackId = track.id;
         const references = props.referencesForTrack(track);
-        const { sourceDuration, durationChoice, resolutionSupported } = durationPlans.get(track.id)!;
-        if (durationChoice.duration == null) unsupportedTracks.push(trackId);
-        else if (!resolutionSupported) unsupportedQualityTracks.push(trackId);
+        const { sourceDuration, durationChoice } = durationPlans.get(track.id)!;
         const trackRequest = {
           duration: durationChoice.duration ?? sourceDuration,
-          prompt: track.prompt,
+          prompt: track.prompt ?? "",
           references,
           modeIntentRevision: track.modeIntentRevision ?? 0,
           trackId,
@@ -738,16 +732,6 @@ function batchGenVideo() {
           idempotencyKey: intent.key,
         };
       });
-      if (unsupportedTracks.length) {
-        window.$message.warning(`片段 ${unsupportedTracks.map((id) => trackList.value.findIndex((track) => track.id === id) + 1).join("、")} 的脚本时长超出模型上限，请拆分分镜或选择支持更长时长的模型`);
-        generateVideoLoad.value = false;
-        return;
-      }
-      if (unsupportedQualityTracks.length) {
-        window.$message.warning(`片段 ${unsupportedQualityTracks.map((id) => trackList.value.findIndex((track) => track.id === id) + 1).join("、")} 的脚本时长不支持当前清晰度，请从顶部下拉重新选择`);
-        generateVideoLoad.value = false;
-        return;
-      }
       const requestData = {
         projectId: scope.projectId,
         scriptId: scope.scriptId,

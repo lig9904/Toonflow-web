@@ -1072,22 +1072,7 @@ async function generateVideo() {
       if (track.migrationRequired || track.mutationBlockedReason) return window.$message.warning(track.mutationBlockedReason || "历史合并片段必须先拆分为一镜一片段，当前不能生成");
       const generationSnapshot = captureVideoGenerationSettings(modelParmas.value);
       if (!(await resolveTrackDraft(track, scopeSnapshot, "生成视频"))) return;
-      if (track.referencesNeedReview) return window.$message.warning("参考素材已变化，请先点击“保存并确认参考”");
-      const sourceDuration = currentTrackSourceDuration.value;
-      const durationChoice = resolveDuration(sourceDuration);
-      if (durationChoice.duration == null) {
-        window.$message.warning(`当前片段脚本时长 ${sourceDuration}s 超出模型支持范围，请拆分分镜或选择支持更长时长的模型`);
-        return;
-      }
-      const selectedDuration = resolveDuration(generationSnapshot.duration);
-      if (selectedDuration.duration !== generationSnapshot.duration || generationSnapshot.duration < durationChoice.duration! || !supportsResolution(generationSnapshot.duration)) {
-        window.$message.warning("当前片段的时长或清晰度不是模型支持的组合，请从顶部下拉重新选择");
-        return;
-      }
-      if (track.compatibility && !track.compatibility.ok) {
-        window.$message.error(track.compatibility.message ?? "当前模型与所选模式或素材不兼容");
-        return;
-      }
+      if (track.referencesNeedReview) return showPreflightError({code:"REFERENCE_REVIEW_REQUIRED",message:"参考素材已变化，请在提示词区域点击“保存并确认参考”",submissionOutcome:"not_submitted",trackId:track.id,shotLabel:buildTrackCardPresentation(track,storyboardList.value).title});
       if (!(await saveTrackReferences(track, scopeSnapshot))) return;
       if (!sameGenerateScope(scopeSnapshot, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
       const requestData = {
@@ -1321,7 +1306,7 @@ watch(inputStateKey,()=>{if(preflightReports.value.length)preflightStale.value=t
 onBeforeUnmount(()=>{if(preflightTimer)clearTimeout(preflightTimer);++preflightSequence;});
 async function inspectVideoBatch(request:any):Promise<Map<number,string>|false>{
  await nextTick();
- const normalized={projectId:request.projectId,scriptId:request.scriptId,model:request.model,resolution:request.resolution,audio:request.audio,trackData:request.trackData.map((t:any)=>({trackId:t.trackId,prompt:t.prompt,duration:t.duration,references:t.references,modeIntentRevision:t.modeIntentRevision??0}))};
+ const normalized={projectId:request.projectId,scriptId:request.scriptId,model:request.model,resolution:request.resolution,audio:request.audio,trackData:request.trackData.map((t:any)=>({trackId:t.trackId,prompt:t.prompt??"",duration:t.duration,references:t.references,modeIntentRevision:t.modeIntentRevision??0}))};
  const key=preflightInputKey(normalized),scope=preflightScopeKey(),state=inputStateKey.value,sequence=++preflightSequence;
  normalized.trackData=normalized.trackData.map((t:any)=>{const approval=preflightApprovals.get(t.trackId);return {...t,...(approval?.key===key?{acknowledgement:approval.fingerprint}:{})};});
  preflightBusy.value=true;
