@@ -1,10 +1,11 @@
 <template>
-  <section class="preflightPanel" aria-label="视频生成前检查">
-    <div class="header"><strong>视频生成前检查</strong><span class="checkSummary">{{ reports.length ? `${reports.length} 个片段 · ${reports.filter(r => !r.preflight.canSubmit).length} 个需要处理` : '尚未检查' }}</span><t-button size="small" variant="text" :aria-expanded="expanded" @click="expanded=!expanded">{{ expanded ? '收起检查详情' : '展开检查详情' }}</t-button><t-button size="small" variant="outline" :loading="busy" :disabled="busy" @click="$emit('check')">重新检查当前输入</t-button></div>
+  <section class="preflightPanel" aria-label="本地生成检查">
+    <div class="header"><strong>本地生成检查</strong><span class="checkSummary">{{ reports.length ? `${reports.length} 个片段 · ${reports.filter(r => !r.preflight.canSubmit).length} 个本地阻断项` : '尚未检查' }}</span><t-button size="small" variant="text" :aria-expanded="expanded" @click="expanded=!expanded">{{ expanded ? '收起检查详情' : '展开检查详情' }}</t-button><t-button size="small" variant="outline" :loading="busy" :disabled="busy" @click="$emit('check')">重新检查当前输入</t-button></div>
+    <p class="platformReviewNote">本地检查用于核对参数和素材；内容是否通过审核，以模型平台提交后的结果为准。</p>
     <div v-show="expanded" class="checkDetails">
     <p v-if="!reports.length">{{ stale ? '图片、提示词或参数已变化，需要重新检查。之前的确认已失效。' : '检查会读取当前图片与提示词，不提交视频，不调用生成模型。' }}</p>
     <article v-for="report in reports" :key="report.preflight.trackId">
-      <div class="verdict"><b>{{report.preflight.shotLabel}}</b><span :class="report.preflight.canSubmit?'ok':'error'">{{report.preflight.canSubmit ? report.preflight.acknowledged ? '已确认构图差异 · 提交时仍会复查' : '当前检查无阻断项' : report.submissionOutcome==='unknown' ? '提交结果待确认' : '需要处理 · 视频尚未提交'}}</span></div>
+      <div class="verdict"><b>{{report.preflight.shotLabel}}</b><span :class="report.preflight.canSubmit?'ok':'error'">{{report.preflight.canSubmit ? report.preflight.acknowledged ? '已确认构图差异 · 提交时仍会复查' : '本地检查无阻断项' : report.submissionOutcome==='unknown' ? '提交结果待确认' : '需要处理 · 视频尚未提交'}}</span></div>
       <p v-if="report.preflight.issues.some((i:any)=>/UNREVIEWED|STALE|PENDING|FAILED/.test(i.code))">部分图片尚未完成当前版本的视觉核验，具体状态见下方检查说明。</p>
       <p v-if="!report.preflight.issues.length" class="ok">当前图片与提示词检查没有发现阻断项。</p>
       <div v-for="(issue,index) in actionable(report)" :key="index" class="issue" :class="issue.severity">
@@ -46,6 +47,7 @@ function confirmUse(report:any){const dialog=DialogPlugin.confirm({header:'确�
 defineExpose({showReference:(ref:any)=>{const issue=props.reports.flatMap(r=>r.preflight.issues).find((i:any)=>i.target?.id===ref.id&&(i.target.kind==='storyboard'?'storyboard':'assets')===ref.sources);if(issue)preview.value=issue;}});
 </script>
 <style scoped>
+.platformReviewNote{margin:6px 0 0;color:var(--td-text-color-secondary);font-size:12px}
 .checkSummary{margin-right:auto;color:var(--td-text-color-secondary);font-size:12px}.checkDetails{max-height:clamp(100px,24vh,220px);overflow-y:auto;overscroll-behavior:contain;padding-right:6px}.checkDetails:empty{display:none}
 
 .preflightPanel{border:1px solid var(--td-component-border);border-radius:8px;padding:14px;margin:0;background:var(--td-bg-color-container);font-size:14px}.header,.verdict,.actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.header{justify-content:space-between}.issue{display:flex;gap:12px;padding:12px 0;border-top:1px solid var(--td-component-border)}.thumb{flex:0 0 92px;width:92px;height:92px;border:2px solid currentColor;border-radius:6px;padding:0;cursor:pointer;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:contain}.error{color:var(--td-error-color)}.warning{color:var(--td-warning-color)}.ok{color:var(--td-success-color)}.body{min-width:0;flex:1}.body p{color:var(--td-text-color-primary);margin:6px 0}details{margin-top:8px}small{overflow-wrap:anywhere}.large{display:block;max-width:100%;max-height:55vh;object-fit:contain;margin:auto}article+article{margin-top:16px;border-top:1px solid var(--td-component-border);padding-top:12px}

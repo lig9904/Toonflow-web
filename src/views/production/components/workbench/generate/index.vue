@@ -64,7 +64,8 @@
         :generating="generateVideoPending"
         :mutation-blocked-reason="currentTrack?.mutationBlockedReason || (currentTrack?.migrationRequired ? '历史合并片段必须先拆分为一镜一片段' : '')"
           @refresh="getGenerateData"
-          @generate="generateVideo" />
+          @generate="generateVideo"
+          @edit-prompt="focusCurrentPrompt" />
       </div>
     </div>
     <VolcengineTrustedAssets v-model="trustedAssetsVisible" :project-id="project?.id" :script-id="episodesId" :targets="trustedLocalTargets" />
@@ -896,6 +897,8 @@ async function saveTrackPrompt(track: TrackItem, scope: GenerateScope, rebased =
   });
   return promise;
 }
+
+function focusCurrentPrompt(){const editor=document.querySelector<HTMLElement>(".generate .promptEditor");editor?.scrollIntoView({block:"nearest",behavior:"smooth"});editor?.focus();}
 
 async function saveCurrentPrompt() {
   const scope = currentScope.value;

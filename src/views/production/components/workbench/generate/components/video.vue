@@ -1,9 +1,10 @@
 <template>
-  <t-card :title="trackTitle + ' · ' + $t('workbench.generate.videoMenu')" header-bordered style="height: 100%">
+  <t-card :title="trackTitle + ' · ' + $t('workbench.generate.videoMenu')" header-bordered class="videoCard" style="height: 100%">
     <template #actions>
       <t-tooltip v-if="mutationBlockedReason" :content="mutationBlockedReason"><t-button size="small" disabled>{{ $t("workbench.generate.generate") }}</t-button></t-tooltip>
       <t-button v-else size="small" :loading="generating" @click="emit('generate')">{{ $t("workbench.generate.generate") }}</t-button>
     </template>
+    <VideoFailureNotice v-if="latestFailure" :key="latestFailure.id" :track-title="trackTitle" :error="latestFailure.errorReason || ''" :state="latestFailure.state" :download-retryable="latestFailure.downloadRetryable" @edit-prompt="emit('editPrompt')" />
     <div class="history">
       <div class="titleBox f ac">
         <i-time />
@@ -42,11 +43,7 @@
             <t-loading size="24px" />
             <span class="loadingText">{{ $t("workbench.generate.generating") }}</span>
           </div>
-          <t-tooltip v-if="v.state === '生成失败' || v.state === '需人工核对'" placement="top" :content="v?.errorReason! ?? ''" theme="light">
-            <t-tag class="stateTag" theme="danger" size="small">
-              {{ v.state === '需人工核对' ? '需人工核对' : $t("workbench.generate.generateFailed") }}
-            </t-tag>
-          </t-tooltip>
+          <button v-if="v.state === '生成失败' || v.state === '需人工核对'" type="button" class="stateTag failureButton" @click.stop="failureDetail=v">查看失败原因</button>
           <div v-if="!mutationBlockedReason && (v.state === '已完成' || v.state === '生成成功')" class="selectBtn" @click.stop="selectVideo(v)">
             <i-check size="16" />
           </div>
@@ -65,6 +62,10 @@
     </div>
   </t-card>
 
+  <t-dialog :visible="!!failureDetail" @close="failureDetail=null" header="视频处理说明" :footer="false" width="640px" attach="body">
+    <VideoFailureNotice v-if="failureDetail" :track-title="trackTitle" :error="failureDetail.errorReason || ''" :state="failureDetail.state" :download-retryable="failureDetail.downloadRetryable" @edit-prompt="failureDetail=null;emit('editPrompt')" />
+  </t-dialog>
+
   <!-- 视频播放弹窗 -->
   <t-dialog
     v-model:visible="videoPlayerVisible"
@@ -81,6 +82,7 @@
 
 <script setup lang="ts">
 import type { Ref } from "vue";
+import VideoFailureNotice from "@/components/reviews/videoFailureNotice.vue";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import { createIdempotencyKey } from "@/utils/idempotency";
@@ -95,12 +97,16 @@ const currentTrack = defineModel<TrackItem>("currentTrack", {
 });
 const emit = defineEmits<{
   generate: [];
+  editPrompt: [];
   refresh: [];
 }>();
 
 const { project } = storeToRefs(projectStore());
 const episodesId = inject<Ref<number>>("episodesId")!;
 
+const failureDetail=ref<HistoryVideoItem|null>(null);
+const latestFailure=computed(()=>{const latest=[...(currentTrack.value?.videoList??[])].sort((a,b)=>Number(b.id)-Number(a.id))[0];return latest && ["生成失败","需人工核对"].includes(latest.state)?latest:null;});
+watch(()=>currentTrack.value?.id,()=>{failureDetail.value=null;});
 const selectVideoId = ref();
 const videoCoverMap = ref<Record<string, string>>({});
 const videoPlayerVisible = ref(false);
@@ -286,8 +292,10 @@ watch(
 </script>
 
 <style lang="scss" scoped>
+.videoCard{display:flex;flex-direction:column;overflow:hidden;:deep(.t-card__body){flex:1;min-height:0;overflow-y:auto;}}
+.failureButton{border:0;cursor:pointer;color:var(--td-error-color);background:var(--td-error-color-1);padding:3px 6px;border-radius:3px;}
 .history {
-  height: 100%;
+  min-height: 90px;
   .titleBox {
     gap: 6px;
     margin-bottom: 8px;
@@ -300,7 +308,6 @@ watch(
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
     gap: 10px;
-    height: 100%;
     .historyItem {
       position: relative;
       width: 130px;
