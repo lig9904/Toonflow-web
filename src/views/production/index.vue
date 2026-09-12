@@ -333,6 +333,7 @@ async function getScriptData() {
 const storyboardNodeRef=ref<any>();
 provide("navigateCanvasImage",async(target:any,repair:boolean)=>{
  if(Number(project.value?.id)!==target.projectId||episodesId.value!==target.scriptId)return;
+ openShowVisible.value=false;
  if(target.kind==='asset'){focusedAssetId.value=target.id;await nextTick();if(findNode('assets'))fitView({nodes:['assets'],duration:300,padding:0.15});return;}
  await productionAgentStore().refreshCanvas();await nextTick();
  if(findNode('storyboard'))await fitView({nodes:['storyboard'],duration:300,padding:0.15});
