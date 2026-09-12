@@ -157,7 +157,7 @@ const preparingEditor = ref(false);
 let menuRequestSequence = 0;
 async function changeMenu(type: string) {
   if (activeMenu.value === type) return;
-  if (activeMenu.value === "generate" && !(await confirmWorkbenchDrafts("切换工作台功能"))) return;
+  if (!(await confirmWorkbenchDrafts("切换工作台功能"))) return;
   const request = ++menuRequestSequence;
   if (type !== "editVideo") {
     ++footageLoadSequence;
