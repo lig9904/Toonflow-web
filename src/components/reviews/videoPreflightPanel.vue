@@ -40,7 +40,7 @@ const expanded=ref(false);
 watch(()=>props.reports,reports=>{if(reports.some(r=>!r.preflight.canSubmit))expanded.value=true;});
 function mediaUrl(path?:string){if(!path)return '';if(/^https?:\/\//.test(path))return path;return new URL(path.startsWith('/oss/')?path:`/oss/${path.replace(/^\//,'')}`,settingStore().baseUrl||location.origin).href;}
 const purpose=(p?:string)=>({'first_frame':'（首帧）','last_frame':'（尾帧）','identity_reference':'（角色参考）','style_reference':'（场景／风格参考）'}[p??'']??'');
-const title=(i:any)=>/FRAMING|SHOT_SIZE/.test(i.code)?'图片构图与镜头要求不一致':i.severity==='error'?'当前输入需要处理':i.severity==='warning'?'建议核对':'检查说明';
+const title=(i:any)=>/FRAMING|SHOT_SIZE/i.test(i.code)?'图片构图与镜头要求不一致':i.severity==='error'?'当前输入需要处理':i.severity==='warning'?'建议核对':'检查说明';
 const actionable=(r:any)=>r.preflight.issues.filter((i:any)=>i.severity!=='info');
 const canAcknowledge=(r:any)=>!r.preflight.canSubmit&&r.preflight.issues.some((i:any)=>i.severity==='error')&&r.preflight.issues.filter((i:any)=>i.severity==='error').every((i:any)=>i.overridable===true);
 function confirmUse(report:any){const dialog=DialogPlugin.confirm({header:'确认继续使用当前图片',body:'你已查看图片与镜头的构图差异，并决定保留当前版本。本次确认不启动生成，且仅适用于当前图片、提示词和参数。',confirmBtn:'确认保留此版本',onConfirm:()=>{emit('acknowledge',report);dialog.destroy();},onClose:()=>dialog.destroy()});}
