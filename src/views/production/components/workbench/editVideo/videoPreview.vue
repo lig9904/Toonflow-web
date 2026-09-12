@@ -1092,6 +1092,7 @@ async function createSpriteFromClip(clip: Clip, track: Track): Promise<VisibleSp
 // 同步轨道中的 clips 到 AVCanvas
 async function syncClipsToCanvas() {
   if (!avCanvas) return;
+  const canvas = avCanvas;
 
   // 如果正在同步，标记需要再次同步
   if (isSyncing) {
@@ -1211,8 +1212,10 @@ async function syncClipsToCanvas() {
       // 创建新的 sprite（传递 track 参数）
       try {
         const sprite = await createSpriteFromClip(clip, track);
+        if (avCanvas !== canvas) { sprite?.destroy(); return; }
         if (sprite) {
-          await avCanvas.addSprite(sprite);
+          await canvas.addSprite(sprite);
+          if (avCanvas !== canvas) return;
           clipSpriteMap.set(clip.id, sprite);
           clipErrorMap.delete(clip.id);
           // 保存 clip 的关键属性快照
@@ -1222,6 +1225,7 @@ async function syncClipsToCanvas() {
           // console.log(`Added sprite for clip: ${clip.id}`);
         }
       } catch (error: any) {
+        if (avCanvas !== canvas) return;
         const reason = error instanceof Error ? error.message : String(error);
         clipErrorMap.set(clip.id, reason);
         console.error(`[Export] ${reason}`);
