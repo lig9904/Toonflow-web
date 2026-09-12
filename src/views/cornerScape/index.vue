@@ -214,8 +214,8 @@
               <div v-for="family in editForm.relepedAudio" :key="'voice-'+family.id" style="margin-top:8px">
                 <div>{{ family.voiceStale ? '固定声音参考已变化，请重新选择并保存' : family.voicePinned ? '已固定声音参考' : '旧绑定：默认取组内第一份，建议选择并固定' }}</div>
                 <t-select :value="family.voiceReference?.id" :options="(family.voiceOptions||[]).map(v=>({label:v.name,value:v.id}))" :disabled="voiceSaving" placeholder="选择声音参考片段" @change="value=>saveFixedVoice(Number(value),family)" />
-                <audio v-if="family.voiceReference?.filePath" :src="voicePreviewUrl(family.voiceReference.filePath)" controls preload="none" style="max-width:100%;height:34px;margin-top:6px" />
-                <small>此声音供后续片段参考，不保证生成结果完全一致；已有片段可用“重新载入”更新参考。</small>
+                <audio v-if="family.voiceReference?.filePath" :src="voicePreviewUrl(family.voiceReference.filePath)" controls preload="none" style="display:block;max-width:100%;height:34px;margin-top:6px" />
+                <small style="display:block;line-height:1.6;margin-top:6px">此声音供后续片段参考，不保证生成结果完全一致；已有片段可用“重新载入”更新参考。</small>
               </div>
               <div v-if="!editForm.relepedAudio.length" class="assets-empty">{{ $t("workbench.cornerScape.noAudio") }}</div>
             </div>
