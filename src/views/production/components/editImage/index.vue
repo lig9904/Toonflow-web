@@ -9,7 +9,7 @@
     placement="center"
     mode="full-screen"
     class="fullscreenDialog">
-    <div class="autosaveNotice">{{ autoSaveStatus }}<t-button v-if="autoSaveStatus.startsWith('保存失败')" size="small" variant="text" @click="retryAutosave">重试</t-button></div>
+    <div class="autosaveNotice">{{ autoSaveStatus }} · 提示词草稿需明确保存<t-button v-if="autoSaveStatus.startsWith('保存失败')" size="small" variant="text" @click="retryAutosave">重试</t-button></div>
     <div class="closure">
       <i-close-small theme="outline" size="24" fill="#4a4a4a" @click="closeFn" />
     </div>
@@ -33,6 +33,8 @@
           :projectId="Number(project!.id)"
           :scriptId="Number(episodesId)"
           :flowId="activeFlowId"
+          :flowVersion="flowVersion"
+          :persist-flow="persistFlow"
           @keep="sureNode" />
       </template>
       <template #edge-removeLine="edgeProps">
@@ -85,6 +87,7 @@ import projectStore from "@/stores/project";
 import userStore from "@/stores/user";
 
 import axios from "@/utils/axios";
+import {confirmCreativeDrafts} from "@/utils/creativeDrafts";
 import type { NodeType, UploadNodeData, GeneratedNodeData } from "../../utils/editImageType";
 import { DEFAULT_EDGE_OPTIONS, createGeneratedData, cleanNodes, cleanEdges } from "../../utils/editImageType";
 import { useLayout } from "../../utils/dagre";
@@ -309,6 +312,7 @@ async function persistFlowNow() {
 
 //保存节点
 async function sureNode(imageUrl: string) {
+  if(!(await confirmCreativeDrafts({scope:`project:${editingScope.projectId}:episode:${editingScope.scriptId}`,action:"选用图片并关闭工作流"})))return;
   try {
     const flowId = await persistFlow();
     emit("save", { imageUrl, flowId });
@@ -369,6 +373,7 @@ function buildFlow() {
 }
 
 async function closeFn() {
+  if(!(await confirmCreativeDrafts({scope:`project:${editingScope.projectId}:episode:${editingScope.scriptId}`,action:"关闭图片工作流"})))return;
   try { await persistFlow(); visible.value = false; }
   catch (error: any) { window.$message.error(error?.message || "自动保存失败，编辑内容已保留"); }
 }

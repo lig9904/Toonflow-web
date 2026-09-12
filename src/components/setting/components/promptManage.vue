@@ -1,7 +1,7 @@
 <template>
   <div v-if="sameSessionUser" class="prompt-management">
     <header class="page-heading">
-      <div><h3>提示词管理</h3><p>共 {{ entries.length }} 项。编辑后自动保存，新版本对下一次运行生效。</p></div>
+      <div><h3>提示词管理</h3><p>共 {{ entries.length }} 项。人工修改先保留为草稿，明确保存后对下一次运行生效。</p></div>
       <button class="secondary" :disabled="loading" @click="loadPrompts">{{ loading ? '读取中…' : '刷新列表' }}</button>
     </header>
     <div v-if="loadError" class="notice error" role="alert">{{ loadError }}</div>
@@ -42,10 +42,11 @@
           <div class="button-row"><button class="secondary" @click="resolveConflict(false)">读取服务端并替换本地草稿</button><button class="primary" @click="resolveConflict(true)">保留草稿，基于最新版本保存</button></div>
         </div>
         <div v-else-if="current.error" class="notice error" role="alert">{{ current.error }} <button v-if="current.status === 'error'" class="text-button" @click="controller.save(selectedKey)">重试保存</button></div>
-        <label class="editor-label" for="managed-prompt-content">提示词正文 <span>停止输入约 0.7 秒后保存</span></label>
+        <label class="editor-label" for="managed-prompt-content">提示词正文 <span>点击“保存正文”后生效</span></label>
         <textarea id="managed-prompt-content" class="content-input" :value="current.draft" :readonly="!current.entry.editable" spellcheck="false" @input="editContent" />
         <div class="save-row" aria-live="polite"><span :class="['save-status', current.status]">{{ statusText }}</span><span>{{ current.draft.length.toLocaleString() }} / 100,000 字符</span></div>
         <div class="button-row actions">
+          <button class="primary" :disabled="current.status === 'saving' || current.status === 'conflict' || current.status === 'invalid'" @click="controller.save(selectedKey)">保存正文</button>
           <button class="secondary" :disabled="!canMutate" @click="restoreDefault">恢复默认</button>
           <button class="secondary" :disabled="panelLoading" @click="showHistory">版本历史</button>
           <button class="secondary" :disabled="panelLoading || current.status === 'saving'" @click="showPreview">组合预览</button>
@@ -101,6 +102,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import userStore from "@/stores/user";
+import { registerCreativeDraft, confirmCreativeDrafts } from "@/utils/creativeDrafts";
 import { getPromptDraftSession, type PromptEntry, type PromptDraft } from "./promptDraftController";
 interface HistoryItem { version: string; content: string; actor: string; operation: string; createdAt: string }
 interface Preview { reviewSystem?: string; visualManual?: string; versions?: Array<{key: string; version: string}>; context?: { actualMode: string; model: string; scriptDuration: number; generation: { duration: number; resolution: string; audio: boolean } }; previewKind: string; content?: string; system?: string; note?: string; notice?: string; parts?: Array<{ key: string; version: string; content: string }>; runtimeContextRequired?: string[] }
@@ -108,6 +110,7 @@ const account = userStore();
 const sessionUserId = Number(account.user?.id);
 const sameSessionUser = computed(() => Number(account.user?.id) === sessionUserId && sessionUserId > 0);
 const { states, controller } = getPromptDraftSession(sessionUserId, {
+  autoSave: false,
   currentUserId: () => account.user?.id,
   createStates: () => reactive<Record<string, PromptDraft>>({}),
   write: async (operation, input) => (await axios.post(`/setting/promptManage/${operation}`, input)).data as PromptEntry,
@@ -190,15 +193,15 @@ const entries = computed(() => Object.values(states).map(s => s.entry));
 const current = computed(() => states[selectedKey.value]);
 const visibleGroups = computed(() => groups.filter(g => g.key !== "all" && (groupFilter.value === "all" || g.key === groupFilter.value)).map(group => ({ ...group, items: entries.value.filter(entry => entry.group === group.key && `${entry.key} ${entry.name} ${entry.usedBy.join(' ')} ${entry.source}`.toLowerCase().includes(search.value.trim().toLowerCase())) })).filter(g => g.items.length));
 const canMutate = computed(() => current.value && !controller.dirty(selectedKey.value) && current.value.status === "saved");
-const statusText = computed(() => ({ saved: "已保存", pending: "等待自动保存…", saving: "保存中…", conflict: "版本冲突，草稿已保留", error: "保存失败，草稿已保留", invalid: "内容未保存" })[current.value?.status ?? "saved"]);
+const statusText = computed(() => ({ saved: "已保存", pending: "未保存草稿", saving: "保存中…", conflict: "版本冲突，草稿已保留", error: "保存失败，草稿已保留", invalid: "内容未保存" })[current.value?.status ?? "saved"]);
 function shortStatus(key: string) { const state = states[key]; return state.status === "saved" ? (state.entry.customized ? "自定义" : "默认") : ({ pending: "待保存", saving: "保存中", conflict: "冲突", error: "失败", invalid: "未保存" })[state.status]; }
 function shortVersion(version: string) { return version?.slice(0, 12) || "—"; }
 function formatDate(value: string | null) { return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "初始默认版本"; }
 function historyOperation(value: string) { return ({ snapshot: "修改前快照", save: "保存", reset: "恢复默认", restore: "历史回滚" } as Record<string, string>)[value] || value; }
-function selectPrompt(key: string) { selectedKey.value = key; panel.value = ""; panelSequence++; panelLoading.value = false; }
+async function selectPrompt(key: string) { if(key!==selectedKey.value && !(await confirmCreativeDrafts({ids:[`prompt-settings:${sessionUserId}`],action:"切换提示词正文"})))return; selectedKey.value = key; panel.value = ""; panelSequence++; panelLoading.value = false; }
 function editContent(event: Event) { controller.edit(selectedKey.value, (event.target as HTMLTextAreaElement).value); }
 async function loadPrompts() {
-  if (loading.value || !sameSessionUser.value) return; loading.value = true; loadError.value = "";
+  if (loading.value || !sameSessionUser.value) return; if(!(await confirmCreativeDrafts({ids:[`prompt-settings:${sessionUserId}`],action:"刷新提示词"})))return; loading.value = true; loadError.value = "";
   const versionsAtRead = new Map(Object.entries(states).map(([key, state]) => [key, state.entry.version]));
   try {
     const response = await axios.post("/setting/promptManage/listPrompts");
@@ -209,7 +212,7 @@ async function loadPrompts() {
   catch (error) { loadError.value = (error as Error)?.message || "读取提示词失败，请重试。"; }
   finally { loading.value = false; }
 }
-async function resolveConflict(keepDraft: boolean) { await controller.resolveConflict(selectedKey.value, keepDraft); }
+async function resolveConflict(keepDraft: boolean) { const key=selectedKey.value; await controller.resolveConflict(key, keepDraft); if(keepDraft)await controller.save(key); }
 async function restoreDefault() { const key = selectedKey.value; await controller.mutate(key, "resetPrompt"); if (key === selectedKey.value) panel.value = ""; }
 async function restoreHistory(version: string) { const key = selectedKey.value; await controller.mutate(key, "restorePrompt", version); if (key === selectedKey.value && states[key].status === "saved") await showHistory(); }
 async function loadPanel(kind: "history" | "preview") {
@@ -223,9 +226,10 @@ async function loadPanel(kind: "history" | "preview") {
 }
 const showHistory = () => loadPanel("history");
 const showPreview = () => { if (isVideoPrompt.value) void loadPreviewModels(); return loadPanel("preview"); };
+const unregisterCreative=registerCreativeDraft({id:`prompt-settings:${sessionUserId}`,scope:`user:${sessionUserId}:prompt-settings`,label:"提示词正文",isDirty:()=>sameSessionUser.value && controller.hasUnsaved(),save:async()=>{for(const key of Object.keys(states))await controller.save(key);return !controller.hasUnsaved();},discard:async()=>{for(const key of Object.keys(states))if(controller.dirty(key)||states[key].status!=="saved")await controller.resolveConflict(key,false);}});
 function beforeUnload(event: BeforeUnloadEvent) { if (controller.hasUnsaved()) { event.preventDefault(); event.returnValue = ""; } }
 onMounted(() => { void loadPrompts(); window.addEventListener("beforeunload", beforeUnload); });
-onBeforeUnmount(() => { disposed = true; panelSequence++; window.removeEventListener("beforeunload", beforeUnload); controller.dispose(); for (const key of Object.keys(states)) if (states[key].status === "pending") void controller.save(key); });
+onBeforeUnmount(() => { disposed = true; panelSequence++; window.removeEventListener("beforeunload", beforeUnload); controller.dispose(); unregisterCreative(); });
 </script>
 
 <style scoped lang="scss">

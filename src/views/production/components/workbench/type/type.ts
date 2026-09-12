@@ -47,6 +47,7 @@ interface StoryboardItem {
   state?: string | null;
   trackId?: number | null;
   videoDesc?: string | null;
+  version?: number;
 }
 
 interface VideoPromptReview {
@@ -98,6 +99,23 @@ interface TrackItem {
   referenceSummary?: { total: number; image: number; video: number; audio: number; purposes: Record<string, number> };
   compatibility?: { ok: boolean; code?: string; message?: string };
   referencesNeedReview?: boolean;
+  storyboardIds?: number[];
+  storyboardCount?: number;
+  cardKind?: "storyboard" | "custom";
+  deleteAction?: "deleteStoryboard" | "deleteTrack";
+  migrationRequired?: boolean;
+  mutationBlockedReason?: string | null;
+}
+
+interface ArchivedSharedTrack {
+  archiveId: number | string;
+  sourceTrackId: number;
+  storyboardIds: number[];
+  prompt: string;
+  videoCount: number;
+  selectionRevision: number;
+  archivedAt: number;
+  videos?: Array<{ id: number; src: string; state: string; errorReason?: string | null }>;
 }
 
 interface VideoItem {

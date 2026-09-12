@@ -1,20 +1,20 @@
 <template>
   <div class="details">
-    <t-dialog :footer="false" v-model:visible="detailsShow" width="60vw" top="5vh" @confirm="onConfirm">
+    <t-dialog :footer="false" v-model:visible="guardedVisible" width="60vw" top="5vh" @confirm="onConfirm">
       <template #header>
         <t-typography-title level="h4" style="margin: 0">{{ $t("workbench.script.edit.title") }}</t-typography-title>
       </template>
-      <t-form :data="props.item" label-align="top" class="detailsForm">
+      <t-form :data="draftForm" label-align="top" class="detailsForm">
         <t-form-item :label="$t('workbench.script.edit.scriptName')" name="name">
-          <t-input v-model="props.item.name" :maxlength="10" :placeholder="$t('workbench.script.edit.scriptNamePh')" />
+          <t-input v-model="draftForm.name" :maxlength="10" :placeholder="$t('workbench.script.edit.scriptNamePh')" />
         </t-form-item>
         <t-form-item :label="$t('workbench.script.edit.scriptContent')" name="content">
           <div class="fc" style="width: 100%">
             <t-textarea
-              v-model="props.item.content"
+              v-model="draftForm.content"
               :placeholder="$t('workbench.script.edit.scriptContentPh')"
               :autosize="{ minRows: 20, maxRows: 20 }" />
-            <div class="scriptLen">{{ props.item.content.length }}/{{ otherSetting.scriptEpisodeLength }}</div>
+            <div class="scriptLen">{{ draftForm.content.length }}/{{ otherSetting.scriptEpisodeLength }}</div>
           </div>
         </t-form-item>
         <t-form-item :label="$t('workbench.script.edit.relatedAssets')" name="assets">
@@ -35,11 +35,11 @@
         </t-form-item>
       </t-form>
       <div style="margin-top: 16px; text-align: right">
-        <t-button variant="outline" @click="detailsShow = false">{{ $t("workbench.novel.import.prevStep") }}</t-button>
+        <t-button variant="outline" @click="closeDraft">{{ $t("workbench.novel.import.prevStep") }}</t-button>
         <t-button
           theme="primary"
           style="margin-left: 10px"
-          :disabled="props.item.content.length > otherSetting.scriptEpisodeLength"
+          :disabled="draftForm.content.length > otherSetting.scriptEpisodeLength"
           @click="onConfirm">
           保存
         </t-button>
@@ -50,6 +50,7 @@
 
 <script setup lang="ts">
 import axios from "@/utils/axios";
+import { useManualCreativeDraft } from "@/utils/useManualCreativeDraft";
 import openAssetsSelector from "@/utils/assetsCheck";
 import settingStore from "@/stores/setting";
 import { createIdempotencyKey } from "@/utils/idempotency";
@@ -78,19 +79,16 @@ const props = defineProps<{
 const { project } = storeToRefs(projectStore());
 
 // ============== Assets ==============
-const selectedAssets = ref<ScriptAsset[]>([]);
-const assetsTouched = ref(false);
-const mutationKey = ref("");
-const capturedWorkspaceVersion = ref<number | undefined>(undefined);
-
-watch(
-  () => props.item?.relatedAssets,
-  (relatedAssets) => {
-    selectedAssets.value = relatedAssets?.map((a) => ({ id: a.id, name: a.name })) ?? [];
-    assetsTouched.value = false;
-  },
-  { immediate: true },
-);
+const manual=useManualCreativeDraft<{name:string;content:string;assets:ScriptAsset[]},{id:number;projectId:number;version?:number;workspaceVersion?:number}>({
+ label:"剧本正文",initial:{name:"",content:"",assets:[]},id:()=>`script-form:${project.value?.id}:${props.item.id}`,scope:()=>`project:${project.value?.id}:episode:${props.item.id}`,
+ load:()=>({value:{name:props.item.name,content:props.item.content,assets:props.item.relatedAssets?.map(item=>({...item}))??[]},meta:{id:props.item.id,projectId:Number(project.value?.id),version:props.item.version,workspaceVersion:props.workspaceVersion}}),
+ commit:async(value,meta)=>{const body={id:meta.id,projectId:meta.projectId,name:value.name,content:value.content,...(assetsTouched.value?{assets:value.assets.map(item=>item.id)}:{}),expectedVersion:meta.version,workspaceExpectedVersion:meta.workspaceVersion};const signature=JSON.stringify(body);if(intent?.signature!==signature)intent={signature,key:createIdempotencyKey("script-manual")};const {data}=await axios.post("/script/updateScript",{...body,mutationKey:intent.key});intent=undefined;return {value,meta:{...meta,version:Number(data.script.version),workspaceVersion:Number(data.workspaceVersion)}};},
+ onSaved:()=>emit("searchScripts"),
+});
+let intent:{signature:string;key:string}|undefined;
+const draftForm=manual.draft,guardedVisible=manual.visible;
+const selectedAssets=computed({get:()=>draftForm.value.assets,set:value=>{draftForm.value.assets=value;}});
+const assetsTouched=ref(false);
 
 async function handleSelectAssets() {
   const assets = await openAssetsSelector({ title: $t("workbench.script.edit.msg.selectAssetsTitle"), types: ["role", "tool", "scene"] });
@@ -111,41 +109,11 @@ function removeAsset(id: number) {
 }
 
 const emit = defineEmits(["searchScripts"]);
-//确认
-async function onConfirm() {
-  try {
-    if (!mutationKey.value) mutationKey.value = createIdempotencyKey("script-edit");
-    await axios.post("/script/updateScript", {
-      id: props.item.id,
-      projectId: project.value?.id == null ? undefined : Number(project.value.id),
-      name: props.item.name,
-      content: props.item.content,
-      expectedVersion: props.item.version,
-      workspaceExpectedVersion: capturedWorkspaceVersion.value,
-      mutationKey: mutationKey.value,
-      ...(assetsTouched.value ? { assets: selectedAssets.value.map((a) => a.id) } : {}),
-    });
-    emit("searchScripts");
-    detailsShow.value = false;
-    mutationKey.value = "";
+async function onConfirm(){if(await manual.save()){await manual.close();detailsShow.value=false;}}
+async function closeDraft(){if(await manual.close())detailsShow.value=false;}
+watch(detailsShow,visible=>{if(visible){assetsTouched.value=false;void manual.open();}},{immediate:true});
+watch(guardedVisible,visible=>{if(!visible)detailsShow.value=false;});
 
-    window.$message.success($t("workbench.script.edit.msg.updateSuccess"));
-  } catch (error) {
-    window.$message.error((error as any)?.message ?? $t("workbench.script.edit.msg.updateFailed"));
-  } finally {
-  }
-}
-
-watch(detailsShow, (visible) => {
-  if (visible) {
-    mutationKey.value = createIdempotencyKey("script-edit");
-    capturedWorkspaceVersion.value = props.workspaceVersion;
-    assetsTouched.value = false;
-  } else {
-    mutationKey.value = "";
-    capturedWorkspaceVersion.value = undefined;
-  }
-});
 </script>
 
 <style lang="scss" scoped>

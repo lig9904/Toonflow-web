@@ -41,7 +41,8 @@
         </div>
       </div>
       <div class="text w">
-        <PromptEditor v-model="data.prompt" :references="references" :placeholder="$t('workbench.production.editImage.promptPlaceholder')" />
+        <PromptEditor v-model="draftPrompt" :references="references" :placeholder="$t('workbench.production.editImage.promptPlaceholder')" />
+        <div class="promptSaveRow"><span>{{ manual.status.value }}</span><t-button size="small" theme="primary" :loading="manual.saving.value" @click="manual.save">保存提示词</t-button><t-button v-if="manual.error.value" size="small" variant="text" @click="manual.reloadSaved(true)">保留草稿并采用最新版本</t-button></div>
       </div>
       <div class="operate ac jb">
         <div class="ac">
@@ -78,6 +79,8 @@ import modelSelect from "@/components/modelSelect.vue";
 import ImageReviewBadge from "@/components/reviews/imageReviewBadge.vue";
 import PromptEditor from "@/components/promptEditor.vue";
 import axios from "@/utils/axios";
+import {useManualCreativeDraft} from "@/utils/useManualCreativeDraft";
+import {confirmCreativeDrafts} from "@/utils/creativeDrafts";
 import { type GeneratedNodeData } from "../../utils/editImageType";
 import type { DropdownOption } from "tdesign-vue-next/es/dropdown";
 import type { Storyboard } from "../../utils/flowBuilder";
@@ -110,8 +113,19 @@ const props = defineProps<{
   projectId: number;
   scriptId: number;
   flowId?: number | null;
+  flowVersion?:number;
+  persistFlow?:()=>Promise<number>;
 }>();
 
+const stablePromptId=`flow-prompt:${props.projectId}:${props.scriptId}:${props.flowId ?? 'new'}:${props.id}`;
+const manual=useManualCreativeDraft<string,{base:string;version:number}>({
+ label:"图片工作流提示词",initial:"",id:()=>stablePromptId,scope:()=>`project:${props.projectId}:episode:${props.scriptId}`,
+ load:()=>({value:props.data.prompt??"",meta:{base:props.data.prompt??"",version:props.flowVersion??0}}),
+ commit:async(value,meta)=>{if((props.data.prompt??"")!==meta.base || (props.flowVersion??0)!==meta.version)throw new Error("图片工作流已更新，草稿已保留；请明确采用最新版本后保存");const before=props.data.prompt;props.data.prompt=value;try{if(!props.persistFlow)throw new Error("当前工作流缺少保存能力");await props.persistFlow();}catch(error){if(props.data.prompt===value)props.data.prompt=before;throw error;}return {value,meta:{base:value,version:props.flowVersion??0}};},
+});
+const draftPrompt=manual.draft;
+onMounted(()=>{void manual.open();});
+watch(()=>props.flowVersion,()=>manual.receiveSaved({value:props.data.prompt??"",meta:{base:props.data.prompt??"",version:props.flowVersion??0}}));
 const mutationKeys = new Map<string, string>();
 function mutationKey(action: string, payload: unknown) {
   const identity = `${action}:${JSON.stringify(payload)}`;
@@ -179,6 +193,7 @@ async function getStoryboardImage() {
 }
 // 生成
 async function handleGenerate() {
+  if(!(await confirmCreativeDrafts({ids:[manual.registrationId],action:"使用已保存提示词生成图片"})))return;
   if (!props.data.model) return window.$message.error($t("workbench.production.editImage.selectModel"));
   if (!props.data.quality) return window.$message.error($t("workbench.production.editImage.selectQuality"));
   if (!props.data.ratio) return window.$message.error($t("workbench.production.editImage.selectRatio"));
@@ -204,7 +219,8 @@ async function handleGenerate() {
   }
 }
 
-function handleKeep() {
+async function handleKeep() {
+  if(!(await confirmCreativeDrafts({ids:[manual.registrationId],action:"选用图片并关闭工作流"})))return;
   if (!props.data.generatedImage) return window.$message.error($t("workbench.production.editImage.generateFirst"));
   emit("keep", props.data.generatedImage);
 }

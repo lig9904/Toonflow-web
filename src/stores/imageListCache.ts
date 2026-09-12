@@ -303,6 +303,16 @@ export default defineStore(
       urlMap.value = {};
     }
 
+    function invalidateUrls(items: ResolveUrlItem[]): void {
+      let changed = false;
+      const next = { ...urlMap.value };
+      items.forEach((item) => {
+        const key = makeUrlKey(item.id, item.sources);
+        if (key in next) { delete next[key]; changed = true; }
+      });
+      if (changed) urlMap.value = next;
+    }
+
     return {
       cacheData,
       userSelectionData,
@@ -321,6 +331,7 @@ export default defineStore(
       resolveUrlSync,
       warmUpUrls,
       clearUrlMap,
+      invalidateUrls,
       clearProjectCache,
     };
   },

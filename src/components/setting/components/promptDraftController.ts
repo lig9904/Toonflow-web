@@ -15,6 +15,7 @@ export function createPromptDraftController(options: {
   write: (operation: PromptMutation, input: PromptMutationInput) => Promise<PromptEntry>;
   read: (key: string) => Promise<PromptEntry>;
   delay?: number;
+  autoSave?: boolean;
   makeId?: () => string;
 }) {
   const states = options.states;
@@ -25,7 +26,7 @@ export function createPromptDraftController(options: {
   const makeId = options.makeId ?? (() => `prompt:${crypto.randomUUID()}`);
   const dirty = (key: string) => states[key]?.draft !== states[key]?.entry.content;
   function clearTimer(key: string) { const timer = timers.get(key); if (timer) clearTimeout(timer); timers.delete(key); }
-  function schedule(key: string) { clearTimer(key); timers.set(key, setTimeout(() => { timers.delete(key); void save(key); }, options.delay ?? 700)); }
+  function schedule(key: string) { if(options.autoSave === false)return; clearTimer(key); timers.set(key, setTimeout(() => { timers.delete(key); void save(key); }, options.delay ?? 700)); }
   function seed(entries: PromptEntry[]) {
     for (const entry of entries) {
       const state = states[entry.key];

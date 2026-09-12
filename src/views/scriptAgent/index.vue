@@ -193,18 +193,18 @@
         </div>
       </Pane>
     </Splitpanes>
-    <editMdPreivew v-model="dialogVisible" @save="onConfirm" :content="editContent" />
+    <editMdPreivew v-model="dialogVisible" :content="editContent" :draft-key="workspaceEditKey" :scope="`project:${project?.id}`" :version="workspaceEditVersion" :commit="commitWorkspaceText" />
 
     <!-- 剧本编辑对话框 -->
     <t-dialog
-      v-model:visible="scriptEditVisible"
+      v-model:visible="scriptGuardedVisible"
       :header="$t('workbench.scriptAgent.editScript')"
       width="80%"
       top="10vh"
       placement="center"
       :confirm-btn="{ content: $t('workbench.scriptAgent.save'), theme: 'primary' }"
       @confirm="saveScript"
-      @close="scriptEditVisible = false">
+      @close="closeScriptDraft">
       <div class="scriptEditForm">
         <div class="scriptEditField">
           <strong>{{ scriptEditData.name }}</strong>
@@ -233,6 +233,8 @@ import settingStore from "@/stores/setting";
 const { themeSetting } = storeToRefs(settingStore());
 import { Splitpanes, Pane } from "splitpanes";
 import axios from "@/utils/axios";
+import {useManualCreativeDraft} from "@/utils/useManualCreativeDraft";
+import {createIdempotencyKey} from "@/utils/idempotency";
 import type { ChatMessagesData } from "@tdesign-vue-next/chat";
 import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
@@ -426,38 +428,29 @@ function getNovel() {
 const dialogVisible = ref(false);
 const editContent = ref("");
 //编辑markdown
-function editMdPreview() {
-  if (currentTable.value == 1) editContent.value = planData.value.storySkeleton;
-  else if (currentTable.value == 2) editContent.value = planData.value.adaptationStrategy;
-  dialogVisible.value = true;
+const workspaceEditKey=ref("");
+const workspaceEditVersion=ref(0);
+const commitWorkspaceText=ref<(value:string,version:number)=>Promise<{content:string;version:number}>>(async()=>{throw new Error("编辑上下文未初始化");});
+function editMdPreview(){
+ const field=currentTable.value==1?"storySkeleton":"adaptationStrategy",projectId=Number(project.value?.id);
+ editContent.value=planData.value[field];workspaceEditVersion.value=Number(scriptAgent.planVersion);workspaceEditKey.value=`workspace:${projectId}:${field}`;
+ let intent:{signature:string;key:string}|undefined;
+ commitWorkspaceText.value=async(value,version)=>{const body={projectId,agentType:"scriptAgent",expectedVersion:version,data:{[field]:value}};const signature=JSON.stringify(body);if(intent?.signature!==signature)intent={signature,key:createIdempotencyKey("workspace-manual")};const response:any=await axios.post("/scriptAgent/setPlanData",{...body,mutationKey:intent.key});intent=undefined;if(Number(project.value?.id)===projectId)await scriptAgent.refreshPlanData({force:true});return {content:value,version:Number(response.data?.version??response.version??scriptAgent.planVersion)};};
+ dialogVisible.value=true;
 }
-
-const scriptEditIndex = ref(-1);
-const scriptEditData = ref({
-  name: "",
-  content: "",
+const scriptEditIndex=ref(-1);
+const scriptEditId=ref<number>();
+const scriptManual=useManualCreativeDraft<{name:string;content:string},{projectId:number;id:number;version:number;workspaceVersion:number;assets?:unknown[]}>({
+ label:"分集剧本",initial:{name:"",content:""},id:()=>`script-workspace:${project.value?.id}:${scriptEditId.value}`,scope:()=>`project:${project.value?.id}`,
+ load:()=>{const row=planData.value.script.find(item=>Number(item.id)===scriptEditId.value);if(!row?.id)throw new Error("剧本版本未读取");return {value:{name:row.name,content:row.content},meta:{projectId:Number(project.value?.id),id:Number(row.id),version:Number(row.version),workspaceVersion:Number(scriptAgent.planVersion),assets:row.assets}};},
+ commit:async(value,meta)=>{const {data}:any=await axios.post("/script/updateScript",{id:meta.id,projectId:meta.projectId,name:value.name,content:value.content,expectedVersion:meta.version,workspaceExpectedVersion:meta.workspaceVersion,mutationKey:createIdempotencyKey("workspace-script-manual")});return {value,meta:{...meta,version:Number(data.script.version),workspaceVersion:Number(data.workspaceVersion)}};},
+ onSaved:(saved)=>{if(Number(project.value?.id)===saved.meta.projectId)void scriptAgent.refreshPlanData({force:true});},
 });
-const scriptEditVisible = ref(false);
+const scriptEditData=scriptManual.draft,scriptEditVisible=scriptManual.visible,scriptGuardedVisible=scriptManual.visible;
+function editScript(index:number){scriptEditIndex.value=index;scriptEditId.value=Number(planData.value.script[index]?.id);void scriptManual.open();}
+async function saveScript(){if(await scriptManual.save())await scriptManual.close();}
+async function closeScriptDraft(){await scriptManual.close();}
 
-function editScript(index: number) {
-  const item = planData.value.script[index];
-  scriptEditIndex.value = index;
-  scriptEditData.value = {
-    name: item.name,
-    content: item.content,
-  };
-  scriptEditVisible.value = true;
-}
-
-async function saveScript() {
-  if (scriptEditIndex.value < 0) return;
-  const previous = planData.value.script[scriptEditIndex.value];
-  planData.value.script[scriptEditIndex.value] = { ...previous, ...scriptEditData.value };
-  scriptAgent.markPlanDraftDirty();
-  await scriptAgent.setPlanData();
-  window.$message.success($t("workbench.scriptAgent.msg.scriptUpdated"));
-  scriptEditVisible.value = false;
-}
 async function delScript(index: number) {
   const item = planData.value.script[index];
   const dialog = DialogPlugin.confirm({
@@ -468,9 +461,8 @@ async function delScript(index: number) {
     theme: "danger",
     onConfirm: async () => {
       try {
-        planData.value.script.splice(index, 1);
-        scriptAgent.markPlanDraftDirty();
-        await scriptAgent.setPlanData();
+        const remaining=planData.value.script.filter(row=>row.id!==item.id);
+        await scriptAgent.setPlanData({script:remaining});
         window.$message.success($t("workbench.scriptAgent.msg.scriptDeleted"));
         dialog.destroy();
       } catch (error: any) {

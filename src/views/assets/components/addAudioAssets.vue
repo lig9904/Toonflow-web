@@ -1,23 +1,23 @@
 <template>
   <t-dialog
-    v-model:visible="addAssetsShow"
+    v-model:visible="guardedVisible"
     :closable="false"
     width="40vw"
-    :header="props.formData.id ? '编辑' : '新增'"
+    :header="localForm.id ? '编辑' : '新增'"
     :maskClosable="false"
     @close-btn-click="handleCancel"
     @confirm="onConfirm"
     @cancel="handleCancel">
     <div class="data">
-      <t-form :data="props.formData" :rules="rules" ref="formRef">
+      <t-form :data="localForm" :rules="rules" ref="formRef">
         <t-form-item :label="$t('workbench.assets.add.audioName')" name="name">
-          <t-input v-model="props.formData.name" :placeholder="$t('workbench.assets.add.audioNamePh')"></t-input>
+          <t-input v-model="localForm.name" :disabled="audioSaving" :placeholder="$t('workbench.assets.add.audioNamePh')"></t-input>
         </t-form-item>
         <t-form-item :label="$t('workbench.assets.add.describe')" name="describe">
-          <t-textarea v-model="props.formData.describe" :placeholder="$t('workbench.assets.add.describePh')"></t-textarea>
+          <t-textarea v-model="localForm.describe" :disabled="audioSaving" :placeholder="$t('workbench.assets.add.describePh')"></t-textarea>
         </t-form-item>
         <t-form-item :label="$t('workbench.assets.add.sex')" name="remark">
-          <t-input v-model="props.formData.sex" :placeholder="$t('workbench.assets.add.sexPh')"></t-input>
+          <t-input v-model="localForm.sex" :disabled="audioSaving" :placeholder="$t('workbench.assets.add.sexPh')"></t-input>
         </t-form-item>
         <t-form-item :label="$t('workbench.assets.add.audioFile')" name="audioFile">
           <div class="audio-list">
@@ -48,8 +48,8 @@
                   <template #icon><i-close size="12" /></template>
                 </t-button>
               </div>
-              <t-input v-model="item.text" placeholder="请输入该音频对应的文本内容" class="audio-text-input" />
-              <t-input v-model="item.describe" placeholder="请输入该音频的描述" class="audio-text-input" />
+              <t-input v-model="item.text" @change="assetsTouched=true" :disabled="audioSaving" placeholder="请输入该音频对应的文本内容" class="audio-text-input" />
+              <t-input v-model="item.describe" @change="assetsTouched=true" :disabled="audioSaving" placeholder="请输入该音频的描述" class="audio-text-input" />
             </div>
             <t-button theme="primary" variant="outline" size="small" @click="addAudioItem">
               <template #icon><i-plus /></template>
@@ -64,6 +64,9 @@
 
 <script setup lang="ts">
 import axios from "@/utils/axios";
+import {persistCreativeForm} from "@/utils/persistCreativeForm";
+import userStore from "@/stores/user";
+import {registerCreativeDraft,confirmCreativeDrafts} from "@/utils/creativeDrafts";
 import projectStore from "@/stores/project";
 import { createIdempotencyKey } from "@/utils/idempotency";
 const { project } = storeToRefs(projectStore());
@@ -94,6 +97,7 @@ const props = defineProps<{
     }[];
   };
 }>();
+const localForm=ref(JSON.parse(JSON.stringify(props.formData)) as typeof props.formData);
 const addAssetsShow = defineModel<boolean>({
   default: false,
 });
@@ -101,7 +105,8 @@ const rules = ref<{}>({
   name: [{ required: true, message: $t("workbench.assets.add.nameRequired"), trigger: "blur" }],
   describe: [{ required: true, message: $t("workbench.assets.add.describeRequired"), trigger: "blur" }],
 });
-function handleCancel() {
+async function handleCancel() {
+  if(!(await confirmCreativeDrafts({ids:[draftId],action:"关闭音频素材编辑"})))return;
   addAssetsShow.value = false;
   // 重置音频列表
   audioItems.value = [{ file: null, text: "", name: "", describe: "" }];
@@ -111,9 +116,12 @@ const emit = defineEmits(["getFilteredData"]);
 
 const audioItems = ref<AudioItem[]>([{ file: null, text: "", name: "", describe: "" }]);
 const assetsTouched = ref(false);
+const audioSaving=ref(false);
 const idempotencyKey = ref("");
 watch(addAssetsShow, (visible) => {
   if (visible) {
+    localForm.value=JSON.parse(JSON.stringify(props.formData));
+    void nextTick(()=>{baseline=signature();});
     idempotencyKey.value = createIdempotencyKey("audio-asset");
     assetsTouched.value = false;
   } else idempotencyKey.value = "";
@@ -122,11 +130,12 @@ const fileInputRefs = ref<HTMLInputElement[]>([]);
 
 // 初始化音频列表
 watch(
-  () => props.formData.sonAssets,
+  () => localForm.value.sonAssets,
   (newSonAssets) => {
     if (newSonAssets && newSonAssets.length > 0) {
       audioItems.value = newSonAssets.map((asset) => ({
         id: asset.id,
+        version:asset.version,
         src: asset.src,
         file: null,
         text: asset.prompt,
@@ -196,7 +205,8 @@ async function fileToBase64(file: File): Promise<string> {
 }
 
 function onConfirm() {
-  formRef.value?.validate().then(async (result: any) => {
+  if(audioSaving.value)return Promise.resolve();audioSaving.value=true;
+  return formRef.value?.validate().then(async (result: any) => {
     if (result == true) {
       const assetsItem = (
         await Promise.all(
@@ -230,17 +240,18 @@ function onConfirm() {
       );
 
       const payload = {
-        name: props.formData.name,
-        describe: props.formData.sex + "|" + props.formData.describe,
+        name: localForm.value.name,
+        describe: localForm.value.sex + "|" + localForm.value.describe,
         projectId: Number(project.value?.id ?? 0),
         assetsItem,
       };
-      if (props.formData.id) {
+      if (localForm.value.id) {
         await axios
           .post(`/assets/updateAudioAssets`, {
-            id: props.formData.id,
+            id: localForm.value.id,
             projectId: Number(project.value?.id ?? 0),
-            expectedVersion: props.formData.version,
+            expectedVersion: localForm.value.version,
+            name:payload.name,describe:payload.describe,
             ...(assetsTouched.value ? { assetsItem: assetsItem.map((item: any) => item.id == null ? item : { ...item, expectedVersion: audioItems.value.find((audio) => audio.id === item.id)?.version }) } : {}),
             idempotencyKey: idempotencyKey.value,
           })
@@ -257,8 +268,15 @@ function onConfirm() {
         });
       }
     }
-  });
+  }).catch((error:any)=>window.$message.error(error?.message??"保存失败，草稿已保留")).finally(()=>{audioSaving.value=false;});
 }
+const draftId=`audio-form:${crypto.randomUUID()}`;
+const signature=()=>JSON.stringify({name:localForm.value.name,describe:localForm.value.describe,sex:localForm.value.sex,items:audioItems.value.map(item=>({...item,file:item.file?{name:item.file.name,size:item.file.size}:null}))});
+let baseline=signature();
+const unregisterDraft=registerCreativeDraft({id:draftId,label:"音频素材设定与文本",scope:()=>`project:${project.value?.id}`,isDirty:()=>addAssetsShow.value && signature()!==baseline,save:async()=>{await onConfirm();return !addAssetsShow.value;},discard:()=>{baseline=signature();addAssetsShow.value=false;}});
+const guardedVisible=computed({get:()=>addAssetsShow.value,set:value=>{if(value)addAssetsShow.value=true;else void handleCancel();}});
+onBeforeUnmount(unregisterDraft);
+persistCreativeForm({key:()=>`toonflow:audio-body:${userStore().user?.id}:${project.value?.id}:${props.formData.id??0}`,active:()=>Boolean(addAssetsShow.value),read:()=>({form:localForm.value,items:audioItems.value.map(item=>({...item,file:null})),baseline,touched:assetsTouched.value}),restore:value=>{localForm.value=value.form;audioItems.value=value.items;baseline=value.baseline;assetsTouched.value=value.touched;}});
 </script>
 
 <style lang="scss" scoped>

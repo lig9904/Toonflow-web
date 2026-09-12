@@ -1,6 +1,6 @@
 <template>
   <div class="purgeNovel">
-    <t-dialog :footer="false" v-model:visible="purgeNovelShow" :header="$t('workbench.script.import.batchTitle')" width="50%" placement="center">
+    <t-dialog :footer="false" v-model:visible="guardedVisible" :header="$t('workbench.script.import.batchTitle')" width="50%" placement="center">
       <div class="data">
         <t-tabs :value="activeKey" disabled>
           <t-tab-panel value="To1" :label="$t('workbench.novel.import.step1')" style="height: 680px; overflow-y: auto">
@@ -96,6 +96,9 @@ import settingStore from "@/stores/setting";
 const { otherSetting } = storeToRefs(settingStore());
 import { LoadingPlugin } from "tdesign-vue-next";
 import axios from "@/utils/axios";
+import {persistCreativeForm} from "@/utils/persistCreativeForm";
+import userStore from "@/stores/user";
+import {registerCreativeDraft,confirmCreativeDrafts} from "@/utils/creativeDrafts";
 import parseScript from "@/utils/parseScript";
 import mammoth from "mammoth";
 import type { UploadFile, PrimaryTableCol, TableRowData } from "tdesign-vue-next";
@@ -261,6 +264,10 @@ async function keep() {
     nextLoading.value = false;
   }
 }
+const draftId=`batch-script:${crypto.randomUUID()}`;
+const unregisterDraft=registerCreativeDraft({id:draftId,label:"待导入剧本",scope:()=>`project:${project.value?.id}`,isDirty:()=>Boolean(purgeNovelShow.value) && Boolean(content.value.trim()),save:async()=>{await keep();return !purgeNovelShow.value;},discard:()=>{content.value="";purgeNovelShow.value=false;}});
+const guardedVisible=computed({get:()=>purgeNovelShow.value,set:value=>{if(value)purgeNovelShow.value=true;else void confirmCreativeDrafts({ids:[draftId],action:"关闭剧本导入"}).then(ok=>{if(ok)purgeNovelShow.value=false;});}});
+onBeforeUnmount(unregisterDraft);
 //关闭弹窗时重置数据
 watch(purgeNovelShow, (newVal) => {
   if (!newVal) {
@@ -300,6 +307,7 @@ async function getAiRegex() {
     aiRegexLoading.value = false;
   }
 }
+persistCreativeForm({key:()=>`toonflow:import-script:${userStore().user?.id}:${project.value?.id}`,active:()=>Boolean(purgeNovelShow.value),read:()=>({content:content.value,regex:customRegStr.value,workspaceVersion:capturedWorkspaceVersion.value}),restore:value=>{content.value=value.content??"";customRegStr.value=value.regex??"";capturedWorkspaceVersion.value=value.workspaceVersion;}});
 </script>
 
 <style lang="scss" scoped>

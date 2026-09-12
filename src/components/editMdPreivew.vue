@@ -1,6 +1,6 @@
 <template>
   <t-dialog
-    v-model:visible="dialogVisible"
+    v-model:visible="guardedVisible"
     :header="$t('components.editMdPreivew.title')"
     :width="'90vw'"
     :confirm-btn="$t('components.editMdPreivew.confirm')"
@@ -25,14 +25,19 @@
 
 <script setup lang="ts">
 import { MdEditor } from "md-editor-v3";
+import {useManualCreativeDraft} from "@/utils/useManualCreativeDraft";
 import type { ToolbarNames } from "md-editor-v3";
 import { useTheme } from "@/utils/theme";
 const { resolvedTheme } = useTheme();
 
 const props = defineProps<{
   content: string;
+  draftKey?: string;
+  scope?: string;
+  version?:number;
+  commit?:(value:string,expectedVersion:number)=>Promise<{content:string;version:number}>;
 }>();
-const editContent = ref<string>("");
+
 const dialogVisible = defineModel({
   default: false,
 });
@@ -59,23 +64,14 @@ const toolbars: ToolbarNames[] = [
   "=",
   "preview",
 ];
-watch(
-  () => dialogVisible.value,
-  () => {
-    editContent.value = props.content;
-  },
-);
-const emit = defineEmits<{
-  save: [string];
-}>();
-function onConfirm() {
-  emit("save", editContent.value);
-  dialogVisible.value = false;
-}
+const emit=defineEmits<{save:[string]}>();
+const manual=useManualCreativeDraft<string,{version:number}>({label:"创作Markdown正文",initial:"",id:()=>props.draftKey??"markdown-editor",scope:()=>props.scope??"workspace",load:()=>({value:props.content,meta:{version:Number(props.version??0)}}),commit:async(value,meta)=>{if(props.commit){const saved=await props.commit(value,meta.version);return {value:saved.content,meta:{version:saved.version}};}emit("save",value);return {value,meta};}});
+const editContent=manual.draft,guardedVisible=manual.visible;
+watch(dialogVisible,visible=>{if(visible)void manual.open();},{immediate:true});
+watch(guardedVisible,visible=>{if(!visible)dialogVisible.value=false;});
+async function onConfirm(){if(await manual.save()){await manual.close();dialogVisible.value=false;}}
+async function onCancel(){if(await manual.close())dialogVisible.value=false;}
 
-function onCancel() {
-  dialogVisible.value = false;
-}
 function onPaste(e: ClipboardEvent) {
   const items = e.clipboardData?.items;
   if (!items) return;

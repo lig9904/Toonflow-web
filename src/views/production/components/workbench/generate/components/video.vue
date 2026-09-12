@@ -1,7 +1,8 @@
 <template>
-  <t-card :title="'#' + (activeTrackIndex + 1) + $t('workbench.generate.videoMenu')" header-bordered style="height: 100%">
+  <t-card :title="trackTitle + ' · ' + $t('workbench.generate.videoMenu')" header-bordered style="height: 100%">
     <template #actions>
-      <t-button size="small" :loading="generating" @click="emit('generate')">{{ $t("workbench.generate.generate") }}</t-button>
+      <t-tooltip v-if="mutationBlockedReason" :content="mutationBlockedReason"><t-button size="small" disabled>{{ $t("workbench.generate.generate") }}</t-button></t-tooltip>
+      <t-button v-else size="small" :loading="generating" @click="emit('generate')">{{ $t("workbench.generate.generate") }}</t-button>
     </template>
     <div class="history">
       <div class="titleBox f ac">
@@ -46,10 +47,10 @@
               {{ v.state === '需人工核对' ? '需人工核对' : $t("workbench.generate.generateFailed") }}
             </t-tag>
           </t-tooltip>
-          <div v-if="v.state === '已完成' || v.state === '生成成功'" class="selectBtn" @click.stop="selectVideo(v)">
+          <div v-if="!mutationBlockedReason && (v.state === '已完成' || v.state === '生成成功')" class="selectBtn" @click.stop="selectVideo(v)">
             <i-check size="16" />
           </div>
-          <div class="delBtn" @click.stop="handleDeleteVideo(v)">
+          <div v-if="!mutationBlockedReason" class="delBtn" @click.stop="handleDeleteVideo(v)">
             <i-delete size="16" />
           </div>
           <div v-if="v.state === '已完成' || v.state === '生成成功'" class="download" @click.stop="downloadVideo(v)">
@@ -58,7 +59,7 @@
           <div v-if="v.state === '已完成' || v.state === '生成成功'" class="playBtn" @click.stop="openVideoPlayer(v)">
             <i-play size="16" />
           </div>
-          <button v-if="v.downloadRetryable && v.jobId" type="button" class="retryBtn" title="继续下载原视频，不重新生成" :disabled="retryingJobs.has(v.jobId)" @click.stop="retryVideoDownload(v)">{{ retryingJobs.has(v.jobId) ? "正在下载…" : "重试下载" }}</button>
+          <button v-if="!mutationBlockedReason && v.downloadRetryable && v.jobId" type="button" class="retryBtn" title="继续下载原视频，不重新生成" :disabled="retryingJobs.has(v.jobId)" @click.stop="retryVideoDownload(v)">{{ retryingJobs.has(v.jobId) ? "正在下载…" : "重试下载" }}</button>
         </div>
       </div>
     </div>
@@ -85,8 +86,9 @@ import projectStore from "@/stores/project";
 import { createIdempotencyKey } from "@/utils/idempotency";
 
 const props = defineProps<{
-  activeTrackIndex: number;
+  trackTitle: string;
   generating?: boolean;
+  mutationBlockedReason?: string;
 }>();
 const currentTrack = defineModel<TrackItem>("currentTrack", {
   default: () => {},
@@ -112,6 +114,7 @@ function trackMutationKey(action: string, videoId: number) {
 
 /** 选中历史视频并同步到后端 */
 async function selectVideo(v: HistoryVideoItem) {
+  if (props.mutationBlockedReason) return window.$message.warning(props.mutationBlockedReason);
   if (!["已完成", "生成成功"].includes(v.state ?? "")) return;
   try {
     await axios.post("/production/workbench/selectVideo", {
@@ -134,6 +137,7 @@ async function selectVideo(v: HistoryVideoItem) {
 
 /** 删除某条历史视频 */
 function handleDeleteVideo(value: HistoryVideoItem) {
+  if (props.mutationBlockedReason) return window.$message.warning(props.mutationBlockedReason);
   const dlg = DialogPlugin.confirm({
     header: $t("workbench.generate.del"),
     body: $t("workbench.generate.delVideo"),

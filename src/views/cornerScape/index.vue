@@ -133,7 +133,7 @@
         </div>
       </t-card>
       <t-empty v-if="dataList.length === 0" type="empty" :title="$t('workbench.cornerScape.operateScriptFirst')" />
-      <t-drawer :closeBtn="true" closeOnEscKeydown :showOverlay="false" :footer="false" v-model:visible="drawerVisible" size="480px">
+      <t-drawer :closeBtn="true" closeOnEscKeydown :showOverlay="false" :footer="false" v-model:visible="guardedDrawerVisible" size="480px">
         <template #header>
           <div class="drawerHeader">
             <span>{{ currentItem?.name }} - {{ $t("workbench.cornerScape.individualConfig") }}</span>
@@ -191,12 +191,12 @@
           <t-form-item :label="$t('workbench.cornerScape.promptLabel')">
             <t-loading style="width: 100%" :loading="currentItem.promptState == '生成中'">
               <t-textarea
-                v-model="editForm.prompt"
+                v-model="draftPrompt"
                 :placeholder="$t('workbench.cornerScape.promptPh')"
                 :autosize="{ minRows: 4, maxRows: 10 }"
-                :disabled="polishing"
-                @blur="savePromptOnBlur" />
+                :disabled="polishing" />
             </t-loading>
+            <div><span>{{ manual.status.value }}</span><t-button size="small" theme="primary" :loading="manual.saving.value" @click="manual.save">保存提示词</t-button><t-button v-if="manual.error.value" size="small" @click="manual.reloadSaved(true)">保留草稿并采用最新保存基准</t-button></div>
           </t-form-item>
           <t-form-item :label="$t('workbench.cornerScape.assetsAudioLabel')">
             <div>
@@ -239,6 +239,8 @@
 
 <script setup lang="ts">
 import axios from "@/utils/axios";
+import {useManualCreativeDraft} from "@/utils/useManualCreativeDraft";
+import {confirmCreativeDrafts} from "@/utils/creativeDrafts";
 import projectStore from "@/stores/project";
 import modelSelect from "@/components/modelSelect.vue";
 import settingStore from "@/stores/setting";
@@ -467,7 +469,16 @@ const editForm = reactive({
   relepedAudio: [] as { id: number; name: string }[],
 });
 
+const manual=useManualCreativeDraft<string,{projectId:number;id:number;version?:number;name:string;describe:string}>({label:"素材提示词",initial:"",id:()=>`corner-prompt:${project.value?.id}:${currentItem.value?.id}`,scope:()=>`project:${project.value?.id}`,
+ load:()=>{const item=currentItem.value;if(!item)throw new Error("素材未选择");return {value:item.prompt??"",meta:{projectId:Number(project.value?.id),id:item.id,version:item.version,name:item.name??"",describe:item.describe??""}};},
+ commit:async(value,meta)=>{const {data}=await axios.post("/assets/updateAssets",{id:meta.id,projectId:meta.projectId,expectedVersion:meta.version,name:meta.name,describe:meta.describe,prompt:value,idempotencyKey:createIdempotencyKey("corner-prompt-manual")});return {value,meta:{...meta,version:Number(data.asset.version)}};},
+ onSaved:saved=>{if(Number(project.value?.id)!==saved.meta.projectId || currentItem.value?.id!==saved.meta.id)return;currentItem.value.prompt=saved.value;currentItem.value.version=Number(saved.meta.version);editForm.prompt=saved.value;const row=dataList.value.find(item=>item.id===saved.meta.id);if(row){row.prompt=saved.value;row.version=Number(saved.meta.version);}},
+});
+const draftPrompt=manual.draft,guardedDrawerVisible=manual.visible;
+watch(guardedDrawerVisible,visible=>{if(!visible)drawerVisible.value=false;});
+watch(()=>[currentItem.value?.prompt,currentItem.value?.version],()=>{if(currentItem.value)manual.receiveSaved({value:currentItem.value.prompt??"",meta:{projectId:Number(project.value?.id),id:currentItem.value.id,version:currentItem.value.version,name:currentItem.value.name??"",describe:currentItem.value.describe??""}});});
 async function openDrawer(item: DataItem) {
+  if(!(await manual.close()))return;
   if (item.state == "生成中") return;
   selectedHistoryId.value = null;
   // 先用当前数据打开抽屉
@@ -483,6 +494,8 @@ async function openDrawer(item: DataItem) {
   editForm.relepedAudio = item?.relepedAudio ?? [];
 
   drawerVisible.value = true;
+  await manual.open();
+  const openedProjectId=Number(project.value?.id),openedAssetId=item.id;
   // 重新获取最新数据（含历史图片）
   try {
     const { data } = await axios.post("/cornerScape/getAllAssets", {
@@ -490,7 +503,7 @@ async function openDrawer(item: DataItem) {
       type: checkboxValue.value,
     });
     const freshItem = (data as DataItem[]).find((d) => d.id === item.id);
-    if (freshItem) {
+    if (freshItem && Number(project.value?.id)===openedProjectId && currentItem.value?.id===openedAssetId) {
       // 更新 dataList 中对应项
       const idx = dataList.value.findIndex((d) => d.id === item.id);
       if (idx !== -1) dataList.value[idx] = freshItem;
@@ -511,7 +524,8 @@ function setItemState(id: number, state: string) {
   if (currentItem.value?.id === id) currentItem.value.state = state;
 }
 
-function regenerateItem() {
+async function regenerateItem() {
+  if(!(await confirmCreativeDrafts({ids:[manual.registrationId],action:"使用已保存提示词生成图片"})))return;
   if (!currentItem.value) return;
   if (!selectValue.value) {
     window.$message.warning($t("workbench.cornerScape.msg.selectModel"));
@@ -557,31 +571,10 @@ function regenerateItem() {
     });
 }
 
-// 提示词失焦保存
-async function savePromptOnBlur() {
-  if (!currentItem.value) return;
-  // 内容没有变化则不保存
-  if (editForm.prompt === currentItem.value.prompt) return;
-  try {
-    await axios.post("/assets/saveAssets", {
-      id: currentItem.value.id,
-      type: currentItem.value.type,
-      projectId: project.value?.id,
-      prompt: editForm.prompt,
-    });
-    // 同步更新本地数据
-    currentItem.value.prompt = editForm.prompt;
-    const target = dataList.value.find((d) => d.id === currentItem.value!.id);
-    if (target) target.prompt = editForm.prompt;
-    window.$message.success($t("workbench.cornerScape.msg.saveSuccess"));
-  } catch (e) {
-    window.$message.error($t("workbench.cornerScape.msg.saveFailed"));
-  }
-}
-
 // AI 润色
 const polishing = ref(false);
 async function polishPrompts() {
+  if(!(await confirmCreativeDrafts({ids:[manual.registrationId],action:"AI重新生成素材提示词"})))return;
   if (!editForm.prompt.trim()) {
     window.$message.warning($t("workbench.cornerScape.msg.enterPromptFirst"));
     return;
@@ -601,6 +594,7 @@ async function polishPrompts() {
     if (data.pending) {window.$message.info("提示词任务已接受，可在素材列表查看结果");return;}
     if (data.assetsId === editForm.assetsId) {
       editForm.prompt = data.prompt;
+      if(currentItem.value && currentItem.value.id===data.assetsId){currentItem.value.prompt=data.prompt;currentItem.value.version=data.version;}
     }
     getFilteredData();
   } catch (e) {

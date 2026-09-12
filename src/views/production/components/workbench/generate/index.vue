@@ -33,15 +33,17 @@
     </div>
     <div class="generate ac">
       <div class="prompt" v-if="currentTrack">
-        <t-card :title="'#' + (activeTrackIndex + 1) + $t('workbench.generate.generateText')" header-bordered class="videoPrompt">
+        <t-card :title="currentTrackTitle + ' · ' + $t('workbench.generate.generateText')" header-bordered class="videoPrompt">
           <template #actions>
+            <t-tag v-if="currentPromptDirty" size="small" theme="warning">未保存草稿</t-tag>
+            <t-button size="small" variant="outline" :disabled="!currentPromptNeedsSave || currentPromptSaving" :loading="currentPromptSaving" @click="saveCurrentPrompt">{{ currentPromptDirty ? '保存提示词' : '保存并确认参考' }}</t-button>
             <t-button size="small" class="genTextbtn" :disabled="!scopeReady || currentPromptPending || currentTrack.state == '生成中'" :loading="currentPromptPending || currentTrack.state == '生成中'" @click="genText">
               {{ $t("workbench.generate.generateText") }}
             </t-button>
           </template>
           <div class="promptData fc">
-            <div class="promptInput" @focusout="handlePromptBlur">
-              <promptEditor v-model="currentTrack.prompt" :references="references" :placeholder="$t('workbench.generate.promptPlaceholder')" />
+            <div class="promptInput">
+              <promptEditor v-model="currentPromptDraft" :references="references" :placeholder="$t('workbench.generate.promptPlaceholder')" />
             </div>
             <t-alert v-if="currentTrack.referencesNeedReview" theme="warning" title="参考素材已变化，已保留人工提示词，请在生成前核对素材编号与正文。" />
             <details v-if="currentTrack.promptReview && currentTrack.prompt === currentTrack.promptReviewPrompt && currentTrack.promptReviewContext === reviewContextSignature(currentTrack)" class="promptReview">
@@ -55,9 +57,10 @@
       <div class="video">
         <videoCard
           v-if="currentTrack"
-          :active-track-index="activeTrackIndex"
-          v-model:current-track="currentTrack"
-          :generating="generateVideoPending"
+          :track-title="currentTrackTitle"
+        v-model:current-track="currentTrack"
+        :generating="generateVideoPending"
+        :mutation-blocked-reason="currentTrack?.mutationBlockedReason || (currentTrack?.migrationRequired ? '历史合并片段必须先拆分为一镜一片段' : '')"
           @refresh="getGenerateData"
           @generate="generateVideo" />
       </div>
@@ -71,6 +74,8 @@
         @change="trackChange"
         :modelParmas="modelParmas"
         :storyboard-list="storyboardList"
+        :archived-shared-tracks="archivedSharedTracks"
+        :list-refreshing="listRefreshPending"
         :clampDuration="clampDuration"
         :sourceDuration="sourceDurationForTrack"
         :resolveDuration="resolveDuration"
@@ -80,9 +85,12 @@
         :prompt-generation-gate="promptGenerationGate"
         :prepare-prompt-generation="preparePromptGeneration"
         :prepare-reference-selection="prepareReferenceSelection"
+        :prepare-track-draft="resolveTrackDraft"
+        :before-track-change="beforeTrackChange"
         :references-for-track="referencesForTrack"
         :review-context-for-generation="reviewContextForGeneration"
-        @getData="getGenerateData" />
+        @getData="getGenerateData"
+        @refreshList="refreshGenerateList" />
     </div>
   </div>
 </template>
@@ -106,6 +114,9 @@ import imageListCacheStore from "@/stores/imageListCache";
 import { createGenerationIntentStore } from "@/utils/generationIntent";
 import { createIdempotencyKey } from "@/utils/idempotency";
 import { captureGenerateScope, positiveId, sameGenerateScope, type GenerateScope, type PromptGenerationIntent } from "./utils/scope";
+import { confirmCreativeDrafts, registerCreativeDraft } from "@/utils/creativeDrafts";
+import { createVideoPromptDraft, normalizeVideoPromptDraft, rebaseVideoPromptDraft, videoPromptDraftConflicts, type VideoPromptDraftRecord } from "./utils/videoPromptDraft";
+import { buildTrackCardPresentation } from "./utils/trackCards";
 import {
   buildVideoReferences,
   buildResolvedReferencePreviews,
@@ -134,6 +145,9 @@ const promptGenerationIntents = new Map<number, PromptGenerationIntent>();
 const promptPending = reactive(new Map<number, { previousJobId?: string; jobId?: string; submitted: boolean }>());
 const persistedTrackPrompts = new Map<number, string>();
 const promptConflictVersions = new Map<number, number>();
+const promptSavingTrackIds = reactive(new Set<number>());
+const videoPromptDrafts = useLocalStorage<Record<string, VideoPromptDraftRecord | string>>(`toonflow:video-prompt-drafts:${userStore().user?.id}`, {});
+const promptDraftUnregister = new Map<number, () => void>();
 const modeMutationIntents = new Map<number, { signature: string; key: string }>();
 const referenceMutationIntents = new Map<number, { signature: string; key: string }>();
 const referenceSavePromises = new Map<number, { signature: string; promise: Promise<boolean> }>();
@@ -177,6 +191,8 @@ const modelParmas = useLocalStorage<ModelSetting>(`toonflow:video-settings:${use
 });
 
 const storyboardList = ref<StoryboardItem[]>([]); // 分镜列表
+const archivedSharedTracks = ref<ArchivedSharedTrack[]>([]);
+const listRefreshPending = ref(false);
 
 const imageList = computed({
   get(): UploadItem[] {
@@ -407,6 +423,7 @@ const currentTrack = computed({
   },
 });
 const currentModeIntent = computed<VideoModeIntent>(() => currentTrack.value ? modeIntentFor(currentTrack.value) : "auto");
+const currentTrackTitle = computed(() => currentTrack.value ? buildTrackCardPresentation(currentTrack.value, storyboardList.value).title : `#${activeTrackIndex.value + 1}`);
 
 async function resolveCurrentVideoMode() {
   const scope = currentScope.value;
@@ -493,9 +510,88 @@ const currentPromptPending = computed(() => {
   return id != null && promptGenerationGate.isPending(id);
 });
 
+function promptDraftKey(trackId: number, scope: GenerateScope): string {
+  return `${scope.projectId}:${scope.scriptId}:${trackId}`;
+}
+function promptServerBaseline(track: TrackItem) {
+  const trackId = positiveId(track.id);
+  return {
+    version: Number(track.version ?? 0),
+    modeIntentRevision: Number(track.modeIntentRevision ?? 0),
+    savedPrompt: trackId == null ? "" : (persistedTrackPrompts.get(trackId) ?? ""),
+  };
+}
+function promptDraftRecord(track: TrackItem, scope: GenerateScope): VideoPromptDraftRecord | undefined {
+  const trackId = positiveId(track.id);
+  return trackId == null ? undefined : normalizeVideoPromptDraft(videoPromptDrafts.value[promptDraftKey(trackId, scope)]);
+}
+function isPromptDirty(track: TrackItem): boolean {
+  const trackId = positiveId(track.id);
+  return trackId != null && track.prompt !== (persistedTrackPrompts.get(trackId) ?? "");
+}
+const currentPromptDirty = computed(() => Boolean(currentTrack.value && isPromptDirty(currentTrack.value)));
+const currentPromptNeedsSave = computed(() => currentPromptDirty.value || Boolean(currentTrack.value?.referencesNeedReview));
+const currentPromptSaving = computed(() => Boolean(currentTrack.value && promptSavingTrackIds.has(currentTrack.value.id)));
+const currentPromptDraft = computed({
+  get: () => currentTrack.value?.prompt ?? "",
+  set: (text: string) => {
+    const track = currentTrack.value;
+    const scope = currentScope.value;
+    const trackId = positiveId(track?.id);
+    if (!track || !scope || trackId == null) return;
+    const key = promptDraftKey(trackId, scope);
+    const saved = persistedTrackPrompts.get(trackId) ?? "";
+    if (text === saved) delete videoPromptDrafts.value[key];
+    else {
+      const existing = normalizeVideoPromptDraft(videoPromptDrafts.value[key]);
+      videoPromptDrafts.value[key] = existing ? { ...existing, text } : createVideoPromptDraft(text, promptServerBaseline(track));
+    }
+    track.prompt = text;
+  },
+});
+
+async function resolveTrackDraft(track: TrackItem, scope: GenerateScope, action: string): Promise<boolean> {
+  if (!isPromptDirty(track)) return true;
+  const allowed = await confirmCreativeDrafts({ ids: [promptDraftRegistrationId(track.id, scope)], action });
+  return allowed && sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value);
+}
+
+function promptDraftRegistrationId(trackId: number, scope: GenerateScope): string {
+  return `video-prompt:${scope.projectId}:${scope.scriptId}:${trackId}`;
+}
+function promptDraftScope(scope: GenerateScope): string { return `project:${scope.projectId}:episode:${scope.scriptId}`; }
+function clearPromptDraftRegistrations() {
+  promptDraftUnregister.forEach((unregister) => unregister());
+  promptDraftUnregister.clear();
+}
+function registerPromptDrafts(scope: GenerateScope, tracks: TrackItem[]) {
+  clearPromptDraftRegistrations();
+  tracks.forEach((track) => {
+    const trackId = positiveId(track.id);
+    if (trackId == null) return;
+    const unregister = registerCreativeDraft({
+      id: promptDraftRegistrationId(trackId, scope),
+      scope: promptDraftScope(scope),
+      label: `视频片段 ${trackId} 的提示词`,
+      isDirty: () => {
+        const current = trackList.value.find((candidate) => candidate.id === trackId) ?? track;
+        return isPromptDirty(current);
+      },
+      save: () => saveTrackPrompt(trackList.value.find((candidate) => candidate.id === trackId) ?? track, scope),
+      discard: () => {
+        const current = trackList.value.find((candidate) => candidate.id === trackId) ?? track;
+        current.prompt = persistedTrackPrompts.get(trackId) ?? "";
+        delete videoPromptDrafts.value[promptDraftKey(trackId, scope)];
+      },
+    });
+    promptDraftUnregister.set(trackId, unregister);
+  });
+}
+
 watch(
   () => [project.value?.id, episodesId.value],
   () => {
+    clearPromptDraftRegistrations();
     scopeSequence.value += 1;
     loadSequence += 1;
     loadedScope.value = undefined;
@@ -503,6 +599,7 @@ watch(
     activeTrackIndex.value = 0;
     trackList.value = [];
     storyboardList.value = [];
+    archivedSharedTracks.value = [];
     persistedTrackPrompts.clear();
     promptConflictVersions.clear();
     promptMutationIntents.clear();
@@ -630,7 +727,7 @@ async function loadGenerateData(scope: GenerateScope, requestSequence: number) {
   });
   if (requestSequence !== loadSequence || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
 
-  if (!Array.isArray(data?.storyboardList) || !Array.isArray(data?.trackList) || data.trackList.some((track: TrackItem) => positiveId(track.id) == null)) throw new Error("片段数据格式无效");
+  if (!Array.isArray(data?.storyboardList) || !Array.isArray(data?.trackList) || !Array.isArray(data?.archivedSharedTracks ?? []) || data.trackList.some((track: TrackItem) => positiveId(track.id) == null)) throw new Error("片段数据格式无效");
   const storyboardData = data.storyboardList;
   const trackData: TrackItem[] = data.trackList.map((track: TrackItem) => ({
     ...track,
@@ -667,6 +764,7 @@ async function loadGenerateData(scope: GenerateScope, requestSequence: number) {
   });
   if (requestSequence !== loadSequence || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
   storyboardList.value = storyboardData;
+  archivedSharedTracks.value = data.archivedSharedTracks ?? [];
   trackList.value = [...trackData];
   const nextIndex = previousTrackId == null ? -1 : trackList.value.findIndex((track) => positiveId(track.id) === previousTrackId);
   activeTrackIndex.value = nextIndex >= 0 ? nextIndex : Math.min(activeTrackIndex.value, Math.max(0, trackList.value.length - 1));
@@ -675,8 +773,18 @@ async function loadGenerateData(scope: GenerateScope, requestSequence: number) {
   promptConflictVersions.clear();
   trackList.value.forEach((track) => {
     const trackId = positiveId(track.id);
-    if (trackId != null) persistedTrackPrompts.set(trackId, track.prompt ?? "");
+    if (trackId != null) {
+      const savedPrompt = track.prompt ?? "";
+      persistedTrackPrompts.set(trackId, savedPrompt);
+      const key = promptDraftKey(trackId, scope);
+      const draft = normalizeVideoPromptDraft(videoPromptDrafts.value[key]);
+      if (draft && draft.text !== savedPrompt) {
+        track.prompt = draft.text;
+        videoPromptDrafts.value[key] = draft;
+      }
+    }
   });
+  registerPromptDrafts(scope, trackList.value);
   syncCurrentDuration();
   if (currentTrack.value) modelParmas.value.mode = modeIntentSelectValue(modeIntentFor(currentTrack.value));
   void resolveCurrentVideoMode();
@@ -693,26 +801,47 @@ function handleDurationUpdated(update: { trackId: number; version: number }) {
   }
 }
 
-function saveTrackPrompt(track: TrackItem, scope: GenerateScope): Promise<boolean> {
-  if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return Promise.resolve(false);
+function confirmPromptDraftOverwrite(track: TrackItem, record: VideoPromptDraftRecord): Promise<boolean> {
+  const serverPrompt = promptServerBaseline(track).savedPrompt;
+  const original = record.baselineUnknown ? "基线未知（旧版草稿）" : (record.baseSavedPrompt || "（空）");
+  return new Promise((resolve) => {
+    const dialog = DialogPlugin.confirm({
+      header: "提示词版本已变化",
+      body: `此草稿基于：${original.slice(0, 160)}\n\n服务器最新：${(serverPrompt || "（空）").slice(0, 160)}\n\n确认后将以本地草稿覆盖服务器最新版本；取消会继续保留草稿。`,
+      confirmBtn: "确认覆盖最新版本",
+      cancelBtn: "保留草稿",
+      onConfirm: () => { dialog.destroy(); resolve(true); },
+      onCancel: () => { dialog.destroy(); resolve(false); },
+      onClose: () => { dialog.destroy(); resolve(false); },
+    });
+  });
+}
+
+async function saveTrackPrompt(track: TrackItem, scope: GenerateScope, rebased = false): Promise<boolean> {
+  if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
   const trackId = positiveId(track.id);
   if (trackId == null || !Number.isSafeInteger(track.version) || track.version! < 0) {
     window.$message.error("轨道版本尚未加载，请刷新后重试");
-    return Promise.resolve(false);
+    return false;
   }
   const prompt = track.prompt ?? "";
-  if (persistedTrackPrompts.get(trackId) === prompt && !promptMutationIntents.has(trackId)) return Promise.resolve(true);
-  if (promptConflictVersions.get(trackId) === track.version) {
-    window.$message.error("轨道版本已冲突，已保留当前提示词，请先刷新");
-    return Promise.resolve(false);
+  const textDirty = persistedTrackPrompts.get(trackId) !== prompt;
+  if (!textDirty && !track.referencesNeedReview && !promptMutationIntents.has(trackId)) return true;
+  const baseline = promptServerBaseline(track);
+  let draft = textDirty ? (promptDraftRecord(track, scope) ?? createVideoPromptDraft(prompt, baseline)) : createVideoPromptDraft(prompt, baseline);
+  if (textDirty && !rebased && videoPromptDraftConflicts(draft, baseline)) {
+    if (!(await confirmPromptDraftOverwrite(track, draft))) return false;
+    draft = rebaseVideoPromptDraft(draft, baseline);
+    videoPromptDrafts.value[promptDraftKey(trackId, scope)] = draft;
+    promptConflictVersions.delete(trackId);
   }
   const payload = {
     id: trackId,
     projectId: scope.projectId,
     scriptId: scope.scriptId,
     prompt,
-    expectedVersion: track.version,
-    modeIntentRevision: track.modeIntentRevision ?? 0,
+    expectedVersion: draft.baseVersion!,
+    modeIntentRevision: draft.baseModeIntentRevision!,
   };
   const signature = JSON.stringify(payload);
   const existing = promptSavePromises.get(trackId);
@@ -720,6 +849,7 @@ function saveTrackPrompt(track: TrackItem, scope: GenerateScope): Promise<boolea
   const previous = promptMutationIntents.get(trackId);
   const intent = previous?.signature === signature ? previous : { signature, key: createIdempotencyKey("track-prompt") };
   promptMutationIntents.set(trackId, intent);
+  promptSavingTrackIds.add(trackId);
   const promise = (async () => {
     try {
       const response: any = await axios.post("/production/workbench/updateVideoPrompt", { ...payload, idempotencyKey: intent.key });
@@ -728,6 +858,7 @@ function saveTrackPrompt(track: TrackItem, scope: GenerateScope): Promise<boolea
       if (target !== track) return false;
       if (track.version === payload.expectedVersion && Number.isSafeInteger(Number(response.version))) track.version = Number(response.version);
       persistedTrackPrompts.set(trackId, prompt);
+      delete videoPromptDrafts.value[promptDraftKey(trackId, scope)];
       track.promptReferenceRevision = track.modeIntentRevision ?? 0;
       track.referencesNeedReview = false;
       promptConflictVersions.delete(trackId);
@@ -738,7 +869,8 @@ function saveTrackPrompt(track: TrackItem, scope: GenerateScope): Promise<boolea
       const status = Number(error?.status);
       if (status === 409) {
         promptConflictVersions.set(trackId, Number(payload.expectedVersion));
-        window.$message.error("轨道已被其他成员修改，已保留当前提示词，请刷新后再确认");
+        window.$message.error("服务器提示词或参考版本已变化，本地草稿已保留；正在读取最新版本供比较");
+        await getGenerateData();
       } else window.$message.error(error?.message ?? "轨道提示词保存失败");
       if (Number.isSafeInteger(status) && status < 500) promptMutationIntents.delete(trackId);
       return false;
@@ -747,16 +879,18 @@ function saveTrackPrompt(track: TrackItem, scope: GenerateScope): Promise<boolea
   promptSavePromises.set(trackId, { signature, promise });
   void promise.finally(() => {
     if (promptSavePromises.get(trackId)?.promise === promise) promptSavePromises.delete(trackId);
+    promptSavingTrackIds.delete(trackId);
   });
   return promise;
 }
 
-async function handlePromptBlur() {
+async function saveCurrentPrompt() {
   const scope = currentScope.value;
   const track = trackList.value[activeTrackIndex.value];
   if (!scope || !track || track.id == null) return;
   await saveTrackPrompt(track, scope);
 }
+
 
 async function preparePromptGeneration(trackIds: readonly number[], scope: GenerateScope): Promise<boolean> {
   if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
@@ -764,10 +898,11 @@ async function preparePromptGeneration(trackIds: readonly number[], scope: Gener
     const id = positiveId(track.id);
     return id != null && trackIds.includes(id);
   });
+  const allowed = await confirmCreativeDrafts({ ids: tracks.map((track) => promptDraftRegistrationId(track.id, scope)), action: "批量重新生成提示词" });
+  if (!allowed || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
   const referenceResults = await Promise.all(tracks.map((track) => saveTrackReferences(track, scope)));
   if (!referenceResults.every(Boolean)) return false;
-  const results = await Promise.all(tracks.map((track) => saveTrackPrompt(track, scope)));
-  return results.length === trackIds.length && results.every(Boolean) && sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value);
+  return tracks.length === trackIds.length && sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value);
 }
 
 async function prepareReferenceSelection(trackIds: readonly number[], scope: GenerateScope): Promise<boolean> {
@@ -776,8 +911,31 @@ async function prepareReferenceSelection(trackIds: readonly number[], scope: Gen
     const id = positiveId(track.id);
     return id != null && trackIds.includes(id);
   });
+  const allowed = await confirmCreativeDrafts({ ids: tracks.map((track) => promptDraftRegistrationId(track.id, scope)), action: "批量生成视频" });
+  if (!allowed || !sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return false;
+  const needsReview = tracks.find((track) => track.referencesNeedReview);
+  if (needsReview) {
+    window.$message.warning("所选片段的参考素材已变化，请先点击“保存并确认参考”");
+    return false;
+  }
   const results = await Promise.all(tracks.map((track) => saveTrackReferences(track, scope)));
   return results.length === trackIds.length && results.every(Boolean) && sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value);
+}
+
+async function refreshGenerateList() {
+  if (listRefreshPending.value) return;
+  const scope = currentScope.value;
+  const track = currentTrack.value;
+  if (!scope) return;
+  listRefreshPending.value = true;
+  try {
+    if (track) {
+      if (!(await confirmCreativeDrafts({ scope: promptDraftScope(scope), action: "刷新片段列表" }))) return;
+      if (!(await saveTrackReferences(track, scope))) return;
+    }
+    if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
+    await getGenerateData();
+  } finally { listRefreshPending.value = false; }
 }
 
 /** 单个轨道生成提示词 */
@@ -786,18 +944,15 @@ async function genText() {
   const track = currentTrack.value;
   const currentTrackId = positiveId(track?.id);
   if (!scope || !scopeReady.value || !track || currentTrackId == null || track.state === "生成中") return;
+  if (track.migrationRequired || track.mutationBlockedReason) return window.$message.warning(track.mutationBlockedReason || "历史合并片段必须先拆分为一镜一片段，当前不能生成");
   const generationSnapshot = captureVideoGenerationSettings(modelParmas.value);
+  if (!(await resolveTrackDraft(track, scope, "重新生成提示词"))) return;
   if (!(await saveTrackReferences(track, scope))) return;
   if (track.compatibility && !track.compatibility.ok) return window.$message.error(track.compatibility.message ?? "当前模型与所选模式或素材不兼容");
   const previousJobId = typeof track.promptJobId === "string" ? track.promptJobId : undefined;
   if (!promptGenerationGate.begin([currentTrackId], new Map([[currentTrackId, previousJobId ?? null]]))) return;
   const references = referencesForTrack(track);
-  const saved = await saveTrackPrompt(track, scope);
   if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
-  if (!saved) {
-    promptGenerationGate.finish(currentTrackId);
-    return;
-  }
   track.state = "生成中";
   track.promptJobId = null;
   const promptPayload = { projectId: scope.projectId, scriptId: scope.scriptId, trackId: currentTrackId, references, model: generationSnapshot.model, modeIntentRevision: track.modeIntentRevision ?? 0, generation: {duration: generationSnapshot.duration, resolution: generationSnapshot.resolution, audio: generationSnapshot.audio}, expectedVersion: track.version };
@@ -820,10 +975,15 @@ async function genText() {
       track.promptJobId = promptIntent.jobId ?? null;
       return;
     }
-    track.prompt = data;
+    const localDraft = isPromptDirty(track);
+    const preservedDraft = localDraft
+      ? (promptDraftRecord(track, scope) ?? createVideoPromptDraft(track.prompt, promptServerBaseline(track)))
+      : undefined;
+    if (!localDraft) track.prompt = data;
     track.state = "已完成";
     if (Number.isSafeInteger(response.version) && response.version >= Number(track.version ?? 0)) track.version = response.version;
     persistedTrackPrompts.set(currentTrackId, data ?? "");
+    if (preservedDraft) videoPromptDrafts.value[promptDraftKey(currentTrackId, scope)] = { ...preservedDraft, text: track.prompt };
     track.promptReferenceRevision = track.modeIntentRevision ?? 0;
     track.referencesNeedReview = false;
     track.promptGenerationContext = undefined;
@@ -862,6 +1022,12 @@ function trackChange(prevIndex?: number) {
   syncCurrentDuration();
   void resolveCurrentVideoMode();
 }
+async function beforeTrackChange(prevIndex: number, _nextIndex: number): Promise<boolean> {
+  const scope = currentScope.value;
+  const track = trackList.value[prevIndex];
+  if (!scope || !track) return true;
+  return resolveTrackDraft(track, scope, "切换片段");
+}
 /** 监听当前轨道的 medias 变化，实时同步到缓存 */
 watch(
   () => currentTrack.value?.medias,
@@ -895,7 +1061,10 @@ async function generateVideo() {
       const track = currentTrack.value;
       const scopeSnapshot = currentScope.value;
       if (!track || !scopeSnapshot) return;
+      if (track.migrationRequired || track.mutationBlockedReason) return window.$message.warning(track.mutationBlockedReason || "历史合并片段必须先拆分为一镜一片段，当前不能生成");
       const generationSnapshot = captureVideoGenerationSettings(modelParmas.value);
+      if (!(await resolveTrackDraft(track, scopeSnapshot, "生成视频"))) return;
+      if (track.referencesNeedReview) return window.$message.warning("参考素材已变化，请先点击“保存并确认参考”");
       const sourceDuration = currentTrackSourceDuration.value;
       const durationChoice = resolveDuration(sourceDuration);
       if (durationChoice.duration == null) {
@@ -1118,6 +1287,7 @@ watch(
 );
 onUnmounted(() => {
   disposed.value = true;
+  clearPromptDraftRegistrations();
   stopPoll();
   stopPromptPoll();
 });

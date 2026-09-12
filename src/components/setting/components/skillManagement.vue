@@ -21,16 +21,16 @@
       </div>
 
       <div v-if="activeEntry && managedDraft" class="managed-editor">
-        <p class="managed-note">此内置 Skill 与提示词管理使用同一生效版本。停止输入约 0.7 秒后自动保存，对下一次运行生效。</p>
+        <p class="managed-note">此内置 Skill 与提示词管理使用同一生效版本。人工修改为草稿，明确保存后对下一次运行生效。</p>
         <p class="managed-meta">{{ managedDraft.entry.customized ? '自定义' : '默认' }} · 版本 {{ managedDraft.entry.version.slice(0, 12) }} · {{ managedDraft.entry.key }}</p>
         <div v-if="managedDraft.status === 'conflict'" class="managed-error">
           <p>{{ managedDraft.error }}</p>
           <t-button size="small" variant="outline" @click="managedController.resolveConflict(managedKey, false)">读取服务端并替换草稿</t-button>
-          <t-button size="small" theme="primary" @click="managedController.resolveConflict(managedKey, true)">保留草稿，基于最新版本保存</t-button>
+          <t-button size="small" theme="primary" @click="resolveManagedConflict">保留草稿，基于最新版本保存</t-button>
         </div>
         <p v-else-if="managedDraft.error" class="managed-error">{{ managedDraft.error }} <t-button v-if="managedDraft.status === 'error'" size="small" variant="text" @click="managedController.save(managedKey)">重试</t-button></p>
         <textarea class="managed-content" :value="managedDraft.draft" aria-label="内置 Skill 提示词正文" spellcheck="false" @input="editManaged" />
-        <div class="managed-meta">{{ managedStatus }} · {{ managedDraft.draft.length }} 字符</div>
+        <div class="managed-meta">{{ managedStatus }} · {{ managedDraft.draft.length }} 字符 <t-button size="small" theme="primary" :disabled="managedDraft.status === 'conflict' || managedDraft.status === 'invalid' || managedDraft.status === 'saving'" @click="managedController.save(managedKey)">保存正文</t-button></div>
         <details><summary>必要上下文与执行协议</summary><p>{{ managedDraft.entry.requiredContext.join('、') }}</p><p v-for="item in managedDraft.entry.codeContracts" :key="item">{{ item }}</p></details>
       </div>
       <div v-else-if="activeEntry" class="previewWrap">
@@ -42,7 +42,7 @@
 
     <t-dialog
       placement="center"
-      v-model:visible="editVisible"
+      v-model:visible="guardedEditVisible"
       :header="$t('setting.skillManagement.edit') + ` ${activeEntry}`"
       width="80vw"
       :confirm-btn="$t('common.save')"
@@ -56,13 +56,15 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, reactive, ref } from "vue";
-import { createPromptDraftController, type PromptEntry, type PromptDraft } from "./promptDraftController";
+import { getPromptDraftSession, type PromptEntry, type PromptDraft } from "./promptDraftController";
 import { MdEditor, MdPreview } from "md-editor-v3";
 import type { ToolbarNames } from "md-editor-v3";
 import { useTheme } from "@/utils/theme";
 const { resolvedTheme } = useTheme();
 import type { TreeNodeModel, TreeNodeValue, TreeOptionData } from "tdesign-vue-next";
 import axios from "@/utils/axios";
+import userStore from "@/stores/user";
+import {registerCreativeDraft,confirmCreativeDrafts} from "@/utils/creativeDrafts";
 
 const mdToolbars: ToolbarNames[] = [
   "bold",
@@ -104,16 +106,14 @@ const draft = ref("");
 const editVisible = ref(false);
 const isSaving = ref(false);
 const managedKey = ref("");
-const managedStates = reactive<Record<string, PromptDraft>>({});
+const managedUserId=Number(userStore().user?.id);
 const managedPaths = new Map<string, string>();
 let loadSequence = 0;
-const managedController = createPromptDraftController({
-  states: managedStates,
-  write: async (_operation, input) => (await axios.post("/setting/skillManagement/saveSkillContent", { ...input, path: managedPaths.get(input.key) })).data as PromptEntry,
-  read: async key => (await axios.post("/setting/skillManagement/getSkillContent", { path: managedPaths.get(key) })).data as PromptEntry,
-});
+const {states:managedStates,controller:managedController}=getPromptDraftSession(managedUserId,{autoSave:false,currentUserId:()=>userStore().user?.id,createStates:()=>reactive<Record<string,PromptDraft>>({}),write:async(operation,input)=>(await axios.post(`/setting/promptManage/${operation}`,input)).data,read:async key=>(await axios.post("/setting/promptManage/promptDetail",{key})).data});
+const unregisterManaged=registerCreativeDraft({id:`skill-settings:${managedUserId}`,scope:`user:${managedUserId}:prompt-settings`,label:"Skill 正文",isDirty:()=>managedController.hasUnsaved(),save:async()=>{for(const key of Object.keys(managedStates))await managedController.save(key);return !managedController.hasUnsaved();},discard:async()=>{for(const key of Object.keys(managedStates))if(managedController.dirty(key))await managedController.resolveConflict(key,false);}});
+
 const managedDraft = computed(() => managedStates[managedKey.value]);
-const managedStatus = computed(() => ({ saved: "已保存", saving: "保存中…", pending: "等待自动保存…", conflict: "版本冲突，草稿保留", error: "保存失败，草稿保留", invalid: "内容未保存" })[managedDraft.value?.status ?? "saved"]);
+const managedStatus = computed(() => ({ saved: "已保存", saving: "保存中…", pending: "未保存草稿", conflict: "版本冲突，草稿保留", error: "保存失败，草稿保留", invalid: "内容未保存" })[managedDraft.value?.status ?? "saved"]);
 function editManaged(event: Event) { managedController.edit(managedKey.value, (event.target as HTMLTextAreaElement).value); }
 function beforeUnload(event: BeforeUnloadEvent) { if (managedController.hasUnsaved()) { event.preventDefault(); event.returnValue = ""; } }
 
@@ -199,34 +199,26 @@ async function onTreeActive(value: TreeNodeValue[], context: { node: TreeNodeMod
   const path = typeof key === "string" ? key : String(key || "");
   const node = context.node.data as TreeItem | undefined;
   if (!path || !node?.isFile || path === activeEntry.value) return;
+  if(!(await confirmCreativeDrafts({scope:`user:${managedUserId}:prompt-settings`,action:"切换Skill正文"})))return;
   activeEntry.value = path;
   await loadContent(path);
 }
 
-function openEditDialog() {
-  draft.value = content.value;
-  editVisible.value = true;
+let editingPath="",baseline="";
+const nativeDraftId=`native-skill:${managedUserId}`;
+function openEditDialog(){editingPath=activeEntry.value;baseline=content.value;draft.value=content.value;editVisible.value=true;}
+async function onSave(){
+ if(!editingPath || isSaving.value)return false;isSaving.value=true;const path=editingPath,text=draft.value;
+ try{const latest=(await axios.post("/setting/skillManagement/getSkillContent",{path})).data;const current=typeof latest==="string"?latest:latest.content;if(current!==baseline)throw new Error("Skill已被更新，本地草稿保留，请重新载入后再核对");await axios.post("/setting/skillManagement/saveSkillContent",{path,content:text});if(editingPath!==path)return false;baseline=text;if(activeEntry.value===path)content.value=text;if(draft.value===text)editVisible.value=false;return draft.value===baseline;}
+ catch(error){window.$message.error((error as Error)?.message??"保存失败，草稿保留");return false;}
+ finally{isSaving.value=false;}
 }
-
-async function onSave() {
-  if (!activeEntry.value) return;
-  isSaving.value = true;
-  try {
-    await axios.post("/setting/skillManagement/saveSkillContent", {
-      path: activeEntry.value,
-      content: draft.value,
-    });
-    content.value = draft.value;
-    editVisible.value = false;
-  } catch (e) {
-    console.error(e);
-  } finally {
-    isSaving.value = false;
-  }
-}
+const unregisterNative=registerCreativeDraft({id:nativeDraftId,label:"Skill文件正文",scope:`user:${managedUserId}:prompt-settings`,isDirty:()=>editVisible.value && draft.value!==baseline,save:onSave,discard:()=>{draft.value=baseline;editVisible.value=false;}});
+const guardedEditVisible=computed({get:()=>editVisible.value,set:value=>{if(value)editVisible.value=true;else void confirmCreativeDrafts({ids:[nativeDraftId],action:"关闭Skill编辑"}).then(ok=>{if(ok)editVisible.value=false;});}});
+async function resolveManagedConflict(){const key=managedKey.value;await managedController.resolveConflict(key,true);await managedController.save(key);}
 
 onMounted(() => { void fetchList(); window.addEventListener("beforeunload", beforeUnload); });
-onBeforeUnmount(() => { loadSequence++; window.removeEventListener("beforeunload", beforeUnload); managedController.dispose(); for (const key of Object.keys(managedStates)) if (managedStates[key].status === "pending") void managedController.save(key); });
+onBeforeUnmount(() => { loadSequence++; window.removeEventListener("beforeunload", beforeUnload); managedController.dispose(); unregisterManaged(); unregisterNative(); });
 </script>
 
 <style lang="scss" scoped>

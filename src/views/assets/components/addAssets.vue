@@ -1,7 +1,7 @@
 <template>
   <div class="addAssets">
     <t-dialog
-      v-model:visible="addAssetsShow"
+      v-model:visible="guardedVisible"
       :closable="false"
       width="40vw"
       :header="props.title"
@@ -10,19 +10,19 @@
       @confirm="onConfirm"
       @cancel="handleCancel">
       <div class="data">
-        <t-form :data="props.formData" :rules="rules" ref="formRef">
+        <t-form :data="draftForm" :rules="rules" ref="formRef">
           <t-form-item :label="$t('workbench.assets.add.name')" name="name">
-            <t-input v-model="props.formData.name" :placeholder="$t('workbench.assets.add.namePh')"></t-input>
+            <t-input v-model="draftForm.name" :placeholder="$t('workbench.assets.add.namePh')"></t-input>
           </t-form-item>
           <t-form-item :label="$t('workbench.assets.add.describe')" name="describe">
-            <t-textarea v-model="props.formData.describe" :placeholder="$t('workbench.assets.add.describePh')"></t-textarea>
+            <t-textarea v-model="draftForm.describe" :placeholder="$t('workbench.assets.add.describePh')"></t-textarea>
           </t-form-item>
           <t-form-item :label="$t('workbench.assets.add.remark')" name="remark">
-            <t-input v-model="props.formData.remark" :placeholder="$t('workbench.assets.add.remarkPh')"></t-input>
+            <t-input v-model="draftForm.remark" :placeholder="$t('workbench.assets.add.remarkPh')"></t-input>
           </t-form-item>
           <t-form-item :label="$t('workbench.assets.add.prompt')" name="prompt" v-if="props.type !== 'clip'">
             <t-textarea
-              v-model="props.formData.prompt"
+              v-model="draftForm.prompt"
               :autosize="{ minRows: 3, maxRows: 5 }"
               :placeholder="$t('workbench.assets.add.promptPh')"></t-textarea>
           </t-form-item>
@@ -34,6 +34,7 @@
 
 <script setup lang="ts">
 import axios from "@/utils/axios";
+import { useManualCreativeDraft } from "@/utils/useManualCreativeDraft";
 import projectStore from "@/stores/project";
 import { createIdempotencyKey } from "@/utils/idempotency";
 const { project } = storeToRefs(projectStore());
@@ -56,56 +57,25 @@ const rules = ref<{}>({
   name: [{ required: true, message: $t("workbench.assets.add.nameRequired"), trigger: "blur" }],
   describe: [{ required: true, message: $t("workbench.assets.add.describeRequired"), trigger: "blur" }],
 });
-const idempotencyKey = ref("");
-watch(addAssetsShow, (visible) => {
-  if (visible) idempotencyKey.value = createIdempotencyKey("asset");
-  else idempotencyKey.value = "";
-});
-function handleCancel() {
-  addAssetsShow.value = false;
-}
 const formRef = ref();
 const emit = defineEmits(["getFilteredData"]);
-function onConfirm() {
-  formRef.value?.validate().then(async (result: any) => {
-    if (result == true) {
-      if (props.formData.id !== 0) {
-        await axios
-          .post(`/assets/updateAssets`, {
-            id: props.formData.id,
-            projectId: Number(project.value?.id),
-            expectedVersion: props.formData.version,
-            name: props.formData.name,
-            describe: props.formData.describe,
-            remark: props.formData.remark,
-            prompt: props.formData.prompt,
-            idempotencyKey: idempotencyKey.value,
-          })
-          .then(() => {
-            window.$message.success($t("workbench.assets.add.updateSuccess"));
-            emit("getFilteredData");
-            addAssetsShow.value = false;
-          });
-      } else {
-        await axios
-          .post(`/assets/addAssets`, {
-            name: props.formData.name,
-            describe: props.formData.describe,
-            remark: props.formData.remark,
-            type: props.type,
-            projectId: Number(project.value?.id),
-            prompt: props.formData.prompt,
-            idempotencyKey: idempotencyKey.value,
-          })
-          .then(() => {
-            window.$message.success($t("workbench.assets.add.addSuccess"));
-            emit("getFilteredData");
-            addAssetsShow.value = false;
-          });
-      }
-    }
-  });
-}
+let intent:{signature:string;key:string}|undefined;
+const manual=useManualCreativeDraft<{name:string;describe:string;remark:string;prompt:string},{id:number;projectId:number;version?:number;type:string}>({
+ label:"素材设定与提示词",initial:{name:"",describe:"",remark:"",prompt:""},id:()=>`asset-form:${project.value?.id}:${props.formData.id}`,scope:()=>`project:${project.value?.id}`,
+ load:()=>({value:{name:props.formData.name,describe:props.formData.describe,remark:props.formData.remark,prompt:props.formData.prompt},meta:{id:props.formData.id,projectId:Number(project.value?.id),version:props.formData.version,type:props.type}}),
+ commit:async(value,meta)=>{
+  if(!value.name.trim() || !value.describe.trim())throw new Error("请输入素材名称和设定");
+  const body={...value,projectId:meta.projectId,...(meta.id?{id:meta.id,expectedVersion:meta.version}:{type:meta.type})};const signature=JSON.stringify(body);if(intent?.signature!==signature)intent={signature,key:createIdempotencyKey("asset-manual")};
+  const {data}=await axios.post(meta.id?"/assets/updateAssets":"/assets/addAssets",{...body,idempotencyKey:intent.key});intent=undefined;
+  return {value,meta:{...meta,id:Number(data.asset?.id??data.assetId??data.id??meta.id),version:Number(data.asset?.version??data.version??meta.version)}};
+ },onSaved:()=>emit("getFilteredData"),
+});
+const draftForm=manual.draft,guardedVisible=manual.visible;
+watch(addAssetsShow,visible=>{if(visible)void manual.open();},{immediate:true});
+watch(guardedVisible,visible=>{if(!visible)addAssetsShow.value=false;});
+async function handleCancel(){if(await manual.close())addAssetsShow.value=false;}
+async function onConfirm(){if(await manual.save()){await manual.close();addAssetsShow.value=false;}}
+
 </script>
 
 <style lang="scss" scoped>

@@ -15,8 +15,8 @@
     v-model:visible="dialogVisible"
     :header="$t('workbench.production.node.script.editDialog')"
     :width="'90vw'"
-    confirm-btn="完成"
-    :cancel-btn="null"
+    confirm-btn="保存"
+    cancel-btn="关闭"
     @confirm="onConfirm"
     @cancel="onCancel"
     @close="onCancel"
@@ -24,6 +24,7 @@
     placement="center"
     attach="body">
     <div class="autosaveStatus">{{ saveStatus }}</div>
+    <div v-if="manual.error.value" class="draftConflict"><t-button size="small" @click="manual.reloadSaved(true)">保留草稿，明确采用最新版本为保存基准</t-button><details><summary>当前保存基准内容</summary><pre>{{ manual.baseline.value }}</pre></details></div>
     <MdEditor
       v-model="editContent"
       :theme="resolveThemeMode(themeSetting.mode)"
@@ -38,6 +39,7 @@
 
 <script setup lang="ts">
 import { ref } from "vue";
+import { useManualCreativeDraft } from "@/utils/useManualCreativeDraft";
 import { Handle, Position } from "@vue-flow/core";
 import { MdEditor, MdPreview } from "md-editor-v3";
 import type { ToolbarNames } from "md-editor-v3";
@@ -58,8 +60,7 @@ const props = defineProps<{
 }>();
 
 const script = defineModel<string>({ required: true });
-const editContent = ref("");
-const dialogVisible = ref(false);
+
 
 const toolbars: ToolbarNames[] = [
   "bold",
@@ -85,55 +86,18 @@ const toolbars: ToolbarNames[] = [
   "preview",
 ];
 
-const saveStatus = ref("自动保存");
-let editor: { id: number; projectId: number; name: string; version: number; workspaceVersion: number } | undefined;
-let lastSavedText = "";
-let saveTimer: ReturnType<typeof setTimeout> | undefined;
-let saving: Promise<void> | undefined;
-let saveIntent: { signature: string; key: string } | undefined;
-async function openEdit() {
-  try {
-    const projectId = Number(projectStore().project?.id);
-    const response: any = await axios.post("/script/getScrptApi", { projectId, name: "" });
-    const row = response.data.find((item: any) => Number(item.id) === productionAgentStore().episodesId);
-    if (!row) throw new Error("当前剧集不可用");
-    editor = { id: Number(row.id), projectId, name: row.name, version: Number(row.version), workspaceVersion: Number(response.workspaceVersion) };
-    editContent.value = row.content;
-    lastSavedText = row.content;
-    script.value = row.content;
-    saveStatus.value = "自动保存";
-    dialogVisible.value = true;
-  } catch (error: any) { window.$message.error(error?.message || "无法加载剧本版本"); }
-}
-async function saveDraft(): Promise<void> {
-  if (saveTimer) clearTimeout(saveTimer);
-  if (saving) { await saving; return saveDraft(); }
-  if (!editor || editContent.value === lastSavedText) return;
-  const text = editContent.value;
-  const body = { id: editor.id, projectId: editor.projectId, name: editor.name, content: text, expectedVersion: editor.version, workspaceExpectedVersion: editor.workspaceVersion };
-  const signature = JSON.stringify(body);
-  if (saveIntent?.signature !== signature) saveIntent = { signature, key: createIdempotencyKey("script-autosave") };
-  saveStatus.value = "保存中…";
-  saving = axios.post("/script/updateScript", { ...body, idempotencyKey: saveIntent.key }).then(({ data }: any) => {
-    editor!.version = Number(data.script.version);
-    editor!.workspaceVersion = Number(data.workspaceVersion);
-    lastSavedText = text;
-    script.value = text;
-    saveIntent = undefined;
-    saveStatus.value = "已保存";
-  }).catch((error: any) => {
-    saveStatus.value = `保存失败，草稿已保留：${error?.message || "请稍后重试"}`;
-  }).finally(() => { saving = undefined; });
-  await saving;
-}
-watch(editContent, () => {
-  if (!dialogVisible.value) return;
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { void saveDraft(); }, 700);
+const manual=useManualCreativeDraft<string,{id:number;projectId:number;name:string;version:number;workspaceVersion:number}>({
+  label:"剧本",initial:"",id:()=>`script:${projectStore().project?.id}:${productionAgentStore().episodesId}`,scope:()=>`project:${projectStore().project?.id}:episode:${productionAgentStore().episodesId}`,
+  load:async()=>{const projectId=Number(projectStore().project?.id);const id=productionAgentStore().episodesId;const response:any=await axios.post("/script/getScrptApi",{projectId,name:""});const row=response.data.find((item:any)=>Number(item.id)===id);if(!row)throw new Error("当前剧集不可用");return {value:row.content,meta:{id:Number(row.id),projectId,name:row.name,version:Number(row.version),workspaceVersion:Number(response.workspaceVersion)}};},
+  commit:async(value,meta)=>{const body={id:meta.id,projectId:meta.projectId,name:meta.name,content:value,expectedVersion:meta.version,workspaceExpectedVersion:meta.workspaceVersion};const signature=JSON.stringify(body);if(saveIntent?.signature!==signature)saveIntent={signature,key:createIdempotencyKey("script-manual-save")};const {data}:any=await axios.post("/script/updateScript",{...body,idempotencyKey:saveIntent.key});saveIntent=undefined;return {value,meta:{...meta,version:Number(data.script.version),workspaceVersion:Number(data.workspaceVersion)}};},
+  onSaved:(saved)=>{if(productionAgentStore().episodesId===saved.meta.id && Number(projectStore().project?.id)===saved.meta.projectId)script.value=saved.value;},
 });
-onBeforeUnmount(() => { if (saveTimer) clearTimeout(saveTimer); });
-async function onConfirm() { await saveDraft(); dialogVisible.value = saveStatus.value.startsWith("保存失败"); }
-async function onCancel() { await onConfirm(); }
+let saveIntent:{signature:string;key:string}|undefined;
+const editContent=manual.draft,dialogVisible=manual.visible,saveStatus=manual.status;
+watch(()=>script.value,()=>{void manual.observeSaved().catch(()=>undefined);});
+function openEdit(){void manual.open();}
+async function onConfirm(){if(await manual.save())await manual.close();}
+async function onCancel(){await manual.close();}
 
 function onPaste(e: ClipboardEvent) {
   const items = e.clipboardData?.items;

@@ -1,7 +1,7 @@
 <template>
   <div class="addScript">
     <t-dialog
-      v-model:visible="addScriptShow"
+      v-model:visible="guardedVisible"
       width="60vw"
       top="5vh"
       :header="$t('workbench.script.add.title')"
@@ -10,7 +10,7 @@
       <div class="data">
         <div class="section name">
           <span class="section-label">{{ $t("workbench.script.add.scriptName") }}</span>
-          <t-input v-model="scriptName" :placeholder="$t('workbench.script.add.scriptNamePh')" />
+          <t-input v-model="scriptName" :readonly="keepLoading" :placeholder="$t('workbench.script.add.scriptNamePh')" />
         </div>
 
         <div class="section upload">
@@ -35,7 +35,7 @@
         <div class="section content">
           <span class="section-label">{{ $t("workbench.script.add.scriptContent") }}</span>
           <t-textarea
-            v-model="scriptData"
+            v-model="scriptData" :readonly="keepLoading"
             :placeholder="$t('workbench.script.add.scriptContentPh')"
             name="description"
             :autosize="{ minRows: 12, maxRows: 12 }" />
@@ -75,6 +75,9 @@ import { LoadingPlugin } from "tdesign-vue-next";
 import mammoth from "mammoth";
 import type { UploadFile } from "tdesign-vue-next";
 import axios from "@/utils/axios";
+import {persistCreativeForm} from "@/utils/persistCreativeForm";
+import userStore from "@/stores/user";
+import {registerCreativeDraft,confirmCreativeDrafts} from "@/utils/creativeDrafts";
 import projectStore from "@/stores/project";
 import openAssetsSelector from "@/utils/assetsCheck";
 import settingStore from "@/stores/setting";
@@ -184,7 +187,8 @@ function removeAsset(id: number) {
   selectedAssets.value = selectedAssets.value.filter((a) => a.id !== id);
 }
 
-function handleCancel(): void {
+async function handleCancel() {
+  if(!(await confirmCreativeDrafts({ids:[draftId],action:"关闭新增剧本"})))return;
   addScriptShow.value = false;
   scriptData.value = "";
   content.value = "";
@@ -236,12 +240,18 @@ async function handleConfirm(): Promise<void> {
 }
 const scriptName = ref<string>("");
 
+const draftId=`new-script:${crypto.randomUUID()}`;
+const dirty=()=>addScriptShow.value && Boolean(scriptData.value.trim() || scriptName.value.trim() || selectedAssets.value.length);
+const unregisterDraft=registerCreativeDraft({id:draftId,label:"新增剧本",scope:()=>`project:${project.value?.id}`,isDirty:dirty,save:async()=>{await handleConfirm();return !addScriptShow.value;},discard:()=>closeWin()});
+const guardedVisible=computed({get:()=>addScriptShow.value,set:value=>{if(value)addScriptShow.value=true;else void handleCancel();}});
+onBeforeUnmount(unregisterDraft);
 watch(addScriptShow, (visible) => {
   if (visible) {
     idempotencyKey.value = createIdempotencyKey("script-create");
     capturedWorkspaceVersion.value = props.workspaceVersion;
   }
 });
+persistCreativeForm({key:()=>`toonflow:new-script:${userStore().user?.id}:${project.value?.id}`,active:()=>Boolean(addScriptShow.value),read:()=>({name:scriptName.value,content:scriptData.value,assets:selectedAssets.value,workspaceVersion:capturedWorkspaceVersion.value}),restore:value=>{scriptName.value=value.name??"";scriptData.value=value.content??"";selectedAssets.value=value.assets??[];capturedWorkspaceVersion.value=value.workspaceVersion;}});
 </script>
 
 <style lang="scss" scoped>

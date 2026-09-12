@@ -1,7 +1,7 @@
 <template>
   <div class="batchGeneration">
     <t-dialog
-      v-model:visible="batchGenerationShow"
+      v-model:visible="guardedVisible"
       :header="$t('workbench.assets.batch.header')"
       top="3vh"
       width="80vw"
@@ -91,6 +91,9 @@ import { ref, computed } from "vue";
 import settingStore from "@/stores/setting";
 const { otherSetting } = storeToRefs(settingStore());
 import axios from "@/utils/axios";
+import {persistCreativeForm} from "@/utils/persistCreativeForm";
+import userStore from "@/stores/user";
+import {registerCreativeDraft,confirmCreativeDrafts} from "@/utils/creativeDrafts";
 import { createIdempotencyKey } from "@/utils/idempotency";
 import projectStore from "@/stores/project";
 import type { TableProps } from "tdesign-vue-next";
@@ -201,6 +204,8 @@ watch(
 
 // 分页变化
 async function handlePageChange(pageInfo: { current: number; pageSize: number }) {
+  if(!(await confirmCreativeDrafts({ids:[draftId],action:"刷新或切换素材列表"})))return;
+  const sequence=++dataSequence,projectId=Number(project.value?.id);
   // 先更新分页信息
   pagination.value.current = pageInfo.current;
   pagination.value.pageSize = pageInfo.pageSize;
@@ -215,7 +220,10 @@ async function handlePageChange(pageInfo: { current: number; pageSize: number })
       limit: pageInfo.pageSize,
     });
 
+    if(sequence!==dataSequence || projectId!==Number(project.value?.id) || !batchGenerationShow.value)return;
     const newData = data.data || [];
+    if(hasDirtyRows()){newData.forEach((row:AssetItem)=>latestSavedRows.set(row.id,{...row}));window.$message.info("列表后台已更新，当前草稿保留；保存或放弃后再刷新");return;}
+    newData.forEach((row:AssetItem)=>latestSavedRows.set(row.id,{...row}));
     tableData.value = newData;
     localData.value = JSON.parse(JSON.stringify(newData)); // 深拷贝避免引用问题
     pagination.value.total = data.total || 0;
@@ -239,8 +247,8 @@ function closeModal(): void {
   searchText.value = "";
 }
 
-function handleCancel() {
-  closeModal();
+async function handleCancel() {
+  if(await confirmCreativeDrafts({ids:[draftId],action:"关闭批量素材编辑"}))closeModal();
 }
 async function processBatch<T>(list: T[], handler: (item: T) => Promise<void>) {
   const batchSize = otherSetting.value.assetsBatchGenereateSize || 5; // 从设置中获取批量生成的大小，默认为5
@@ -250,55 +258,24 @@ async function processBatch<T>(list: T[], handler: (item: T) => Promise<void>) {
 }
 const emit = defineEmits(["update"]);
 
-async function onConfirm() {
-  if (selectedRowKeys.value.length === 0) {
-    window.$message.warning($t('workbench.assets.selectAtLeastOne'));
-    return;
-  }
-  const selectedAssets = tableData.value.filter((item) => selectedRowKeys.value.includes(item.id));
-  if (selectedAssets.length === 0) {
-    window.$message.error($t('workbench.assets.batch.selectToSave'));
-    return;
-  }
-
-  try {
-    await processBatch(selectedAssets, async (item) => {
-      await axios.post("/assets/updateAssets", {
-        id: item.id,
-        projectId: Number(project.value?.id),
-        expectedVersion: item.version,
-        name: item.name,
-        describe: item.describe ?? "",
-        type: item.type,
-        remark: item.remark ?? "",
-        prompt: item.prompt,
-        idempotencyKey: createIdempotencyKey("asset-batch-update"),
-      });
-      if (item.filePath) {
-        await axios.post("/assets/saveAssets", {
-          id: item.id,
-          base64: "",
-          filePath: item.filePath,
-          prompt: item.prompt,
-          projectId: project.value!.id,
-          expectedVersion: item.version,
-          idempotencyKey: createIdempotencyKey("asset-batch-image"),
-        });
-      }
-    });
-
-    window.$message.success($t('workbench.assets.batch.saveSuccess'));
-    emit("update"); // 通知父组件更新数据
-    closeModal();
-  } catch (error) {
-    console.error("保存失败:", error);
-    window.$message.error($t('workbench.assets.batch.saveFail'));
-  }
+const rowSaveIntents=new Map<number,{signature:string;key:string}>();
+async function saveRows(rows:AssetItem[]):Promise<boolean>{
+ try{for(const row of rows){const base=localData.value.find(item=>item.id===row.id);if(!base || row.prompt===base.prompt)continue;const value={...row};const body={id:row.id,projectId:Number(project.value?.id),expectedVersion:base.version,name:value.name,describe:value.describe??"",remark:value.remark??"",prompt:value.prompt};const signature=JSON.stringify(body);let intent=rowSaveIntents.get(row.id);if(intent?.signature!==signature){intent={signature,key:createIdempotencyKey("asset-manual-batch")};rowSaveIntents.set(row.id,intent);}const {data}=await axios.post("/assets/updateAssets",{...body,idempotencyKey:intent.key});const saved={...value,...data.asset};Object.assign(base,saved);latestSavedRows.set(row.id,{...saved});row.version=saved.version;rowSaveIntents.delete(row.id);}return true;}catch(error){window.$message.error((error as Error)?.message??"保存失败，草稿保留");return false;}
 }
+async function onConfirm(){const rows=tableData.value.filter(item=>selectedRowKeys.value.includes(item.id));if(!rows.length){window.$message.warning("请选择要保存的素材");return;}if(await saveRows(rows)){emit("update");if(!hasDirtyRows())closeModal();else window.$message.info("已保存选中素材，仍有未保存草稿");}}
+const draftId=`batch-asset:${crypto.randomUUID()}`;
+let dataSequence=0;
+const latestSavedRows=new Map<number,AssetItem>();
+function hasDirtyRows(){return Boolean(batchGenerationShow.value) && tableData.value.some(row=>row.prompt!==localData.value.find(item=>item.id===row.id)?.prompt);}
+const unregisterDraft=registerCreativeDraft({id:draftId,label:"批量素材提示词",scope:()=>`project:${project.value?.id}`,isDirty:hasDirtyRows,save:async()=>await saveRows(tableData.value)&&!hasDirtyRows(),discard:()=>{for(const row of tableData.value){const saved=latestSavedRows.get(row.id)??localData.value.find(item=>item.id===row.id);if(saved)Object.assign(row,saved);}localData.value=JSON.parse(JSON.stringify(tableData.value));}});
+const guardedVisible=computed({get:()=>batchGenerationShow.value,set:value=>{if(value)batchGenerationShow.value=true;else void handleCancel();}});
+onBeforeUnmount(()=>{dataSequence++;unregisterDraft();});
+
 const textLoading = ref(false);
 const promptGenerateCancel = ref(false);
 // 生成提示词
 async function handleBatchGeneratePrompt() {
+  if(!(await confirmCreativeDrafts({ids:[draftId],action:"重新生成素材提示词"})))return;
   const selectedAssets = tableData.value.filter((item) => selectedRowKeys.value.includes(item.id));
   if (selectedAssets.length === 0) {
     window.$message.error($t('workbench.assets.selectAtLeastOne'));
@@ -338,13 +315,11 @@ async function generatePrompt(data: AssetItem) {
     if(res.data.pending) return;
     const index = tableData.value.findIndex((item: AssetItem) => item.id === res.data.assetsId);
     if (index !== -1 && !promptGenerateCancel.value) {
-      tableData.value[index].prompt = res.data.prompt;
-      Object.assign(tableData.value[index],{version:res.data.version});
-      // 同步更新 localData
-      const localIndex = localData.value.findIndex((item: AssetItem) => item.id === res.data.assetsId);
-      if (localIndex !== -1) {
-        localData.value[localIndex].prompt = res.data.prompt;
-      }
+      const row=tableData.value[index],base=localData.value.find(item=>item.id===row.id);
+      const dirty=Boolean(base && row.prompt!==base.prompt);
+      const saved={...(base??row),prompt:res.data.prompt,version:res.data.version};latestSavedRows.set(row.id,saved);
+      if(!dirty){Object.assign(row,saved);if(base)Object.assign(base,saved);}
+      else window.$message.info("AI已保存新提示词，人工草稿及原版本仍保留");
     }
   } catch (e: any) {
     window.$message.error(`"${data.name}" ${e?.message ?? $t('workbench.assets.batch.promptFail')}`);
@@ -356,6 +331,7 @@ const imageLoading = ref(false);
 const imageGenerateCancel = ref(false);
 // 生成图片
 async function handleBatchGenerateImage() {
+  if(!(await confirmCreativeDrafts({ids:[draftId],action:"使用已保存提示词生成图片"})))return;
   const selectedAssets = tableData.value.filter((item) => selectedRowKeys.value.includes(item.id));
   if (selectedAssets.length === 0) {
     window.$message.warning($t('workbench.assets.selectAtLeastOne'));
@@ -429,6 +405,7 @@ async function startGenerate(data: { id: number; prompt: string; name: string; t
     rowImageLoading.value[data.id] = false;
   }
 }
+persistCreativeForm({key:()=>`toonflow:batch-asset-body:${userStore().user?.id}:${project.value?.id}:${props.type}`,active:()=>Boolean(batchGenerationShow.value),read:()=>({rows:tableData.value,base:localData.value}),restore:value=>{tableData.value=value.rows??[];localData.value=value.base??[];}});
 </script>
 
 <style lang="scss" scoped>

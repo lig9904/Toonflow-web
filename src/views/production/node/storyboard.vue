@@ -113,13 +113,13 @@
         </t-button> -->
       </div>
     </div>
-    <t-dialog v-model:visible="manualAddVisible" header="新增分镜" :confirm-btn="{ content: '保存', loading: manualAdding }" :cancel-btn="'取消'" @confirm="addManualStoryboard">
+    <t-dialog v-model:visible="manualAddGuardedVisible" header="新增分镜" :confirm-btn="{ content: '保存', loading: manualAdding }" :cancel-btn="'取消'" @confirm="addManualStoryboard">
       <t-form label-align="top">
         <t-form-item label="提示词">
-          <t-textarea v-model="manualAddForm.prompt" :autosize="{ minRows: 3, maxRows: 6 }" placeholder="请输入分镜提示词" />
+          <t-textarea v-model="manualAddForm.prompt" :disabled="manualAdding" :autosize="{ minRows: 3, maxRows: 6 }" placeholder="请输入分镜提示词" />
         </t-form-item>
         <t-form-item label="画面描述">
-          <t-textarea v-model="manualAddForm.videoDesc" :autosize="{ minRows: 3, maxRows: 6 }" placeholder="请输入画面描述（可选）" />
+          <t-textarea v-model="manualAddForm.videoDesc" :disabled="manualAdding" :autosize="{ minRows: 3, maxRows: 6 }" placeholder="请输入画面描述（可选）" />
         </t-form-item>
         <t-form-item label="时长（秒）">
           <t-input-number v-model="manualAddForm.duration" :min="1" :max="60" />
@@ -144,6 +144,10 @@ import editImage from "../components/editImage/index.vue";
 import { LoadingPlugin } from "tdesign-vue-next";
 import { Handle, Position, type Edge } from "@vue-flow/core";
 import axios from "@/utils/axios";
+import {createIdempotencyKey} from "@/utils/idempotency";
+import {captureCanvasDeletion} from "@/utils/storyboardDeletion";
+import {registerCreativeDraft,confirmCreativeDrafts} from "@/utils/creativeDrafts";
+import userStore from "@/stores/user";
 import type { AssetItem, Storyboard } from "../utils/flowBuilder";
 import projectStore from "@/stores/project";
 import productionAgentStore from "@/stores/productionAgent";
@@ -178,6 +182,13 @@ const visible = ref(false);
 const manualAddVisible = ref(false);
 const manualAdding = ref(false);
 const manualAddForm = reactive({ prompt: "", videoDesc: "", duration: 5 });
+const manualAddDraftId=`new-board:${crypto.randomUUID()}`;
+const unregisterManualAdd=registerCreativeDraft({id:manualAddDraftId,label:"新增分镜",scope:()=>`project:${project.value?.id}:episode:${episodesId.value}`,isDirty:()=>manualAddVisible.value && Boolean(manualAddForm.prompt.trim() || manualAddForm.videoDesc.trim()),save:async()=>{await addManualStoryboard();return !manualAddVisible.value;},discard:()=>{manualAddForm.prompt="";manualAddForm.videoDesc="";manualAddVisible.value=false;}});
+const manualAddGuardedVisible=computed({get:()=>manualAddVisible.value,set:value=>{if(value)manualAddVisible.value=true;else void confirmCreativeDrafts({ids:[manualAddDraftId],action:"关闭新增分镜"}).then(ok=>{if(ok)manualAddVisible.value=false;});}});
+const dynamicEditors=new Set<()=>void>();
+const deletionDialogs=new Set<{destroy:()=>void}>();
+let canvasDisposed=false;
+onBeforeUnmount(()=>{canvasDisposed=true;unregisterManualAdd();for(const cleanup of dynamicEditors)cleanup();for(const dialog of deletionDialogs)dialog.destroy();deletionDialogs.clear();});
 const previewVisible = ref(false);
 const previewLoading = ref(false);
 const previewImages = ref<string[]>([]);
@@ -193,50 +204,35 @@ function setHoveredFrame(index: number | null) {
 function selectAll() {
   selectedIds.value = storyboard.value.map((s) => s.id!).filter(Boolean);
 }
-function handleDeleteSelected() {
-  const dialog = DialogPlugin.confirm({
-    header: $t("workbench.assets.confirmDeleteHeader"),
-    body: $t("workbench.production.node.storyboard.confirmBatchDeleteBody", { index: selectedIds.value.length }),
-    confirmBtn: $t("workbench.assets.deleteBtn"),
-    cancelBtn: $t("workbench.assets.cancelBtn"),
-    theme: "warning",
-    onConfirm: async () => {
-      try {
-        if (!selectedIds.value.length) {
-          dialog.destroy();
-          return window.$message.error($t("workbench.production.node.storyboard.pleaseSelectImage"));
-        }
-        const selectedItems = selectedIds.value.map((id) => storyboard.value.find((storyboardItem) => storyboardItem.id === id));
-        const writable = await Promise.all(selectedItems.map((item) => (item ? ensureStoryboardWritable(item) : false)));
-        if (writable.some((value) => !value)) {
-          dialog.destroy();
-          return;
-        }
-        const expectedVersions = Object.fromEntries(
-          selectedItems.map((item) => [item!.id!, getStoryboardStateFor(item!.id)?.version]).filter(([, version]) => version != null),
-        );
-        if (Object.keys(expectedVersions).length !== selectedIds.value.length) {
-          dialog.destroy();
-          return window.$message.warning("分镜状态尚未读取，暂不能删除");
-        }
-        await axios.post("/production/storyboard/batchDelete", {
-          ids: selectedIds.value,
-          projectId: project.value?.id,
-          expectedVersions,
-        });
-        storyboard.value = storyboard.value.filter((i) => !selectedIds.value.includes(i.id!));
-        selectedIds.value = [];
-        window.$message.success($t("workbench.production.node.storyboard.deleteSuccess"));
-      } catch (e) {
-        const status = getProductionStateErrorStatus(e);
-        if (status === 409 || status === 423 || status === 403) window.$message.warning("分镜状态已变化或被锁定，请重新载入后再操作");
-        else window.$message.error(getProductionStateErrorMessage(e, $t("workbench.production.node.storyboard.removeFailed")));
-      } finally {
-        dialog.destroy();
-      }
-    },
-  });
+const deletionIntents=new Map<string,string>();
+async function confirmStoryboardDeletion(ids:readonly number[]) {
+  const projectId=Number(project.value?.id),scriptId=Number(episodesId.value),chosen=[...new Set(ids.map(Number))];
+  if(!chosen.length || chosen.some(id=>!Number.isSafeInteger(id)||id<=0))return;
+  if(!(await confirmCreativeDrafts({scope:`project:${projectId}:episode:${scriptId}`,action:"删除所选分镜及片段"})))return;
+  try {
+    const {data}=await axios.post("/production/getFlowData",{projectId,episodesId:scriptId});
+    if(Number(project.value?.id)!==projectId || Number(episodesId.value)!==scriptId)return;
+    const items=captureCanvasDeletion(projectId,scriptId,chosen,data.storyboard??[]);
+    const signature=JSON.stringify({projectId,items});let idempotencyKey=deletionIntents.get(signature);if(!idempotencyKey){idempotencyKey=createIdempotencyKey("canvas-storyboard-delete");deletionIntents.set(signature,idempotencyKey);}
+    const capturedKey=idempotencyKey;let deleting=false;
+    const dialog=DialogPlugin.confirm({header:"删除分镜及独立片段",body:`将删除 ${items.length} 条分镜及对应片段记录；NAS 历史文件保留。目标与版本已固定，状态变化时整批拒绝。`,confirmBtn:"删除",cancelBtn:"取消",theme:"warning",closeOnOverlayClick:false,
+      onConfirm:async()=>{
+        if(deleting)return;if(canvasDisposed || Number(project.value?.id)!==projectId || Number(episodesId.value)!==scriptId){dialog.destroy();return;}deleting=true;dialog.update({confirmBtn:{content:"删除",loading:true}});
+        try {
+          if(items.length===1 && items[0].trackId!=null)await axios.post("/production/workbench/deleteStoryboardTrack",{projectId,...items[0],idempotencyKey:capturedKey});
+          else await axios.post("/production/storyboard/deleteStoryboardTracks",{projectId,items,idempotencyKey:capturedKey});
+          deletionIntents.delete(signature);
+          if(Number(project.value?.id)===projectId && Number(episodesId.value)===scriptId){storyboard.value=storyboard.value.filter(item=>!chosen.includes(Number(item.id)));selectedIds.value=selectedIds.value.filter(id=>!chosen.includes(id));void productionAgent.getFlowData();}
+          window.$message.success("分镜及对应片段记录已删除");deletionDialogs.delete(dialog);dialog.destroy();
+        } catch(error:any) {window.$message.error(error?.message??"删除结果尚未确认，草稿和列表保留");dialog.update({body:"删除未完成或结果尚未确认。目标与版本保持不变；重试将使用同一个请求编号。发生版本冲突请取消并刷新。",confirmBtn:{content:"重试删除",loading:false}});}
+        finally{deleting=false;}
+      },
+    });
+    deletionDialogs.add(dialog);
+  }catch(error:any){window.$message.error(error?.message??"无法读取删除目标与版本");}
 }
+function handleDeleteSelected(){void confirmStoryboardDeletion([...selectedIds.value]);}
+
 const currentRow = ref<{
   flowId?: number | null;
   resultImages: { src: string; prompt: string }[];
@@ -570,57 +566,14 @@ watch(visible, (isVisible) => {
   if (!isVisible) imageEditExpectedVersion.value = undefined;
 });
 
-async function removeFn(id: number) {
-  const dialog = DialogPlugin.confirm({
-    header: $t("workbench.assets.confirmDeleteHeader"),
-    body: $t("workbench.production.node.storyboard.confirmDeleteBody"),
-    confirmBtn: $t("workbench.assets.deleteBtn"),
-    cancelBtn: $t("workbench.assets.cancelBtn"),
-    theme: "warning",
-    onConfirm: async () => {
-      if (!id) {
-        const index = storyboard.value.findIndex((s) => s.id === id);
-        if (index !== -1) {
-          storyboard.value.splice(index, 1);
-        }
-        dialog.destroy();
-        return;
-      }
-      try {
-        const target = storyboard.value.find((s) => s.id === id);
-        if (!target || !(await ensureStoryboardWritable(target))) {
-          dialog.destroy();
-          return;
-        }
-        const expectedVersion = getStoryboardStateFor(target.id)?.version;
-        if (expectedVersion == null) {
-          dialog.destroy();
-          return window.$message.warning("分镜状态尚未读取，暂不能删除");
-        }
-        await axios.post("/production/storyboard/removeFrame", {
-          id,
-          projectId: project.value?.id,
-          expectedVersion,
-        });
-        const index = storyboard.value.findIndex((s) => s.id === id);
-        if (index !== -1) {
-          storyboard.value.splice(index, 1);
-        }
-      } catch (e) {
-        const status = getProductionStateErrorStatus(e);
-        if (status === 409 || status === 423 || status === 403) window.$message.warning("分镜状态已变化或被锁定，请重新载入后再操作");
-        else window.$message.error(getProductionStateErrorMessage(e, $t("workbench.production.node.storyboard.removeFailed")));
-      } finally {
-        dialog.destroy();
-      }
-    },
-  });
-}
+async function removeFn(id:number){await confirmStoryboardDeletion([id]);}
 
 async function editInfo(item: Storyboard) {
   if (item.id == null || project.value?.id == null) return;
   productionAgent.setStoryboardEditing(item.id, true);
+  const initialProject=Number(project.value?.id),initialEpisode=Number(episodesId.value);
   const loaded = await loadStoryboardState(item);
+  if(canvasDisposed || initialProject!==Number(project.value?.id) || initialEpisode!==Number(episodesId.value)){productionAgent.setStoryboardEditing(item.id,false);return;}
   if (!loaded) {
     productionAgent.setStoryboardEditing(item.id, false);
     return;
@@ -634,6 +587,25 @@ async function editInfo(item: Storyboard) {
   const expectedVersion = ref(loaded.state.version);
   const operationLoading = ref(false);
   const operationError = ref("");
+  const capturedProjectId=Number(project.value!.id),capturedScriptId=Number(episodesId.value);
+  const draftId=`storyboard-body:${capturedProjectId}:${item.id}`;
+  const storageKey=`toonflow:manual-board:${userStore().user?.id}:${capturedProjectId}:${item.id}`;
+  let baseline=JSON.stringify(formData);
+  try{const saved=JSON.parse(sessionStorage.getItem(storageKey)||"null");if(saved?.formData && Number.isInteger(saved.expectedVersion)){Object.assign(formData,saved.formData);baseline=saved.baseline;expectedVersion.value=saved.expectedVersion;}}catch{}
+  const isDirty=()=>JSON.stringify(formData)!==baseline;
+  const persist=()=>{try{if(isDirty())sessionStorage.setItem(storageKey,JSON.stringify({formData:{...formData},baseline,expectedVersion:expectedVersion.value}));else sessionStorage.removeItem(storageKey);}catch{}};
+  const stopDraftWatch=watch(formData,persist,{deep:true});
+  let unregister=()=>{};
+  const cleanup=()=>{persist();stopDraftWatch();unregister();productionAgent.setStoryboardEditing(item.id!,false);dynamicEditors.delete(cleanup);confirmDialog.destroy();};
+  dynamicEditors.add(cleanup);
+  const commitDraft=async()=>{
+    if(editState.value.locked || operationLoading.value)return false;
+    operationLoading.value=true;const captured={...formData};
+    try{const response=await editStoryboardInfo(capturedProjectId,item.id!,expectedVersion.value,captured.prompt,captured.videoDesc);applyResponse(response);baseline=JSON.stringify(captured);persist();operationError.value="";return !isDirty();}
+    catch(error){setOperationError(getProductionStateErrorMessage(error,"保存失败，草稿已保留"));return false;}
+    finally{operationLoading.value=false;refreshDialogBody();}
+  };
+  const closeDraft=async()=>{if(await confirmCreativeDrafts({ids:[draftId],action:"关闭分镜编辑"})){cleanup();}};
 
   const refreshDialogBody = () =>
     confirmDialog.update({
@@ -651,12 +623,14 @@ async function editInfo(item: Storyboard) {
   };
 
   const reloadBaseline = async () => {
+    if(!(await confirmCreativeDrafts({ids:[draftId],action:"重新载入分镜"})))return;
     operationLoading.value = true;
     try {
       const response = await loadStoryboardState(item);
       if (!response) return;
       formData.prompt = response.storyboard.prompt ?? "";
       formData.videoDesc = response.storyboard.videoDesc ?? "";
+      baseline=JSON.stringify(formData);persist();
       editState.value = response.state;
       expectedVersion.value = response.state.version;
       operationError.value = "";
@@ -757,33 +731,14 @@ async function editInfo(item: Storyboard) {
       loading: false,
       disabled: editState.value.locked,
     },
-    onConfirm: async () => {
-      if (editState.value.locked) return;
-      let shouldClose = false;
-      confirmDialog.update({ confirmBtn: { content: $t("common.submitting"), loading: true } });
-      try {
-        const response = await editStoryboardInfo(project.value!.id, item.id!, expectedVersion.value, formData.prompt, formData.videoDesc);
-        applyResponse(response);
-        operationError.value = "";
-        productionAgent.setStoryboardEditing(item.id!, false);
-        window.$message.success($t("common.editSuccess"));
-        shouldClose = true;
-      } catch (error) {
-        const status = getProductionStateErrorStatus(error);
-        if (status === 409 || status === 423 || status === 403) {
-          setOperationError(status === 423 ? "分镜已锁定，请重新载入" : "分镜内容已变化或当前无权限，请重新载入");
-        } else {
-          window.$message.error(getProductionStateErrorMessage(error, $t("common.editFailed")));
-        }
-      } finally {
-        confirmDialog.update({ confirmBtn: { content: $t("common.submit"), loading: false, disabled: editState.value.locked } });
-        refreshDialogBody();
-        if (shouldClose) confirmDialog.destroy();
-      }
-    },
-    onCancel: () => productionAgent.setStoryboardEditing(item.id!, false),
-    onClose: () => productionAgent.setStoryboardEditing(item.id!, false),
+    closeOnOverlayClick:false,
+    closeOnEscKeydown:false,
+    onConfirm:async()=>{if(await commitDraft()){cleanup();}},
+    onCancel:()=>{void closeDraft();},
+    onClose:()=>{void closeDraft();},
+
   });
+  unregister=registerCreativeDraft({id:draftId,label:"分镜描述与图片提示词",scope:`project:${capturedProjectId}:episode:${capturedScriptId}`,isDirty,save:commitDraft,discard:()=>{Object.assign(formData,JSON.parse(baseline));persist();}});
 }
 
 function openEditInfo(item: Storyboard) {

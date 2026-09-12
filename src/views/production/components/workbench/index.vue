@@ -11,7 +11,7 @@
     dialogClassName="noFooter"
     class="fullscreenDialog">
     <div class="closure">
-      <i-close-small theme="outline" size="24" fill="#4a4a4a" @click="visible = false" />
+      <i-close-small theme="outline" size="24" fill="#4a4a4a" @click="requestClose" />
     </div>
     <div class="topMenu f ac">
       <t-tooltip :content="$t('workbench.production.wb.quickPreview')" placement="bottom" theme="light" destroyOnClose :showArrow="false">
@@ -66,6 +66,7 @@ import editVideo from "./editVideo/index.vue";
 import { generateId, type Track } from "vue-clip-track";
 import type { MediaItem, AudioItem } from "./editVideo/utils/mediaData";
 import projectStore from "@/stores/project";
+import { confirmCreativeDrafts, hasCreativeDrafts } from "@/utils/creativeDrafts";
 const { project } = storeToRefs(projectStore());
 
 const visible = defineModel("visible", {
@@ -73,6 +74,21 @@ const visible = defineModel("visible", {
   default: false,
 });
 const activeMenu = ref("preview");
+let approvedClose = false;
+function workbenchDraftScope() { return `project:${Number(project.value?.id)}:episode:${Number(episodesId.value)}`; }
+async function confirmWorkbenchDrafts(action: string) { return confirmCreativeDrafts({ scope: workbenchDraftScope(), action }); }
+async function requestClose() {
+  if (!(await confirmWorkbenchDrafts("关闭视频工作台"))) return;
+  approvedClose = true;
+  visible.value = false;
+}
+watch(visible, (next, previous) => {
+  if (next || !previous) return;
+  if (approvedClose) { approvedClose = false; return; }
+  if (!hasCreativeDrafts({ scope: workbenchDraftScope() })) return;
+  visible.value = true;
+  void requestClose();
+});
 
 // 画布尺寸配置
 const canvasWidth = ref(1920);
@@ -133,6 +149,7 @@ const preparingEditor = ref(false);
 let menuRequestSequence = 0;
 async function changeMenu(type: string) {
   if (activeMenu.value === type) return;
+  if (activeMenu.value === "generate" && !(await confirmWorkbenchDrafts("切换工作台功能"))) return;
   const request = ++menuRequestSequence;
   if (type !== "editVideo") {
     ++footageLoadSequence;

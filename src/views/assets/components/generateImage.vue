@@ -1,7 +1,7 @@
 <template>
   <div class="generateImage">
     <t-dialog
-      v-model:visible="generateImageShow"
+      v-model:visible="guardedVisible"
       top="4vh"
       width="80vw"
       :header="$t('workbench.assets.gen.header')"
@@ -39,12 +39,13 @@
             <div class="input">
               <t-loading :loading="promptLoading" :text="$t('workbench.assets.gen.generatingPrompt')">
                 <t-textarea
-                  v-model="props.formData.prompt"
+                  v-model="draftPrompt"
                   :placeholder="$t('workbench.assets.gen.promptPlaceholder')"
                   :autosize="{ minRows: 15, maxRows: 15 }"
                   :disabled="generateLoading" />
               </t-loading>
             </div>
+            <div class="manualPromptActions"><span>{{ manual.status.value }}</span><t-button size="small" theme="primary" :loading="manual.saving.value" @click="manual.save">保存提示词</t-button></div>
           </div>
           <div class="selectModel f">
             <div style="width: 60%">
@@ -139,6 +140,8 @@ import modelSelect from "@/components/modelSelect.vue";
 import projectStore from "@/stores/project";
 const { project } = storeToRefs(projectStore());
 import axios from "@/utils/axios";
+import {useManualCreativeDraft} from "@/utils/useManualCreativeDraft";
+import {confirmCreativeDrafts} from "@/utils/creativeDrafts";
 import { createIdempotencyKey } from "@/utils/idempotency";
 const props = defineProps<{
   formData: {
@@ -158,8 +161,19 @@ const generateImageShow = defineModel({
   default: false,
 });
 
+const manual=useManualCreativeDraft<string,{id:number;projectId:number;version?:number;name:string;describe:string}>({
+ label:"素材图片提示词",initial:"",id:()=>`asset-prompt:${project.value?.id}:${props.formData.id}`,scope:()=>`project:${project.value?.id}`,
+ load:()=>({value:props.formData.prompt??"",meta:{id:Number(props.formData.id),projectId:Number(project.value?.id),version:props.formData.version,name:props.formData.name??"",describe:props.formData.describe??""}}),
+ commit:async(value,meta)=>{const {data}=await axios.post("/assets/updateAssets",{id:meta.id,projectId:meta.projectId,expectedVersion:meta.version,name:meta.name,describe:meta.describe,prompt:value,idempotencyKey:createIdempotencyKey("asset-prompt-save")});return {value,meta:{...meta,version:Number(data.asset.version)}};},
+ onSaved:(saved)=>{if(Number(props.formData.id)===saved.meta.id && Number(project.value?.id)===saved.meta.projectId){props.formData.prompt=saved.value;props.formData.version=saved.meta.version;}},
+});
+const draftPrompt=manual.draft,guardedVisible=manual.visible;
+watch(generateImageShow,visible=>{if(visible)void manual.open();},{immediate:true});
+watch(guardedVisible,visible=>{if(!visible)generateImageShow.value=false;});
+
 //关闭生成图片的弹窗
-function handleCancel() {
+async function handleCancel() {
+  if(!(await manual.close()))return;
   generateImageShow.value = false;
   generateLoading.value = false;
   stopPolling();
@@ -175,7 +189,16 @@ const selectValue = ref(""); //选择的模型
 const value2 = ref("");
 //智能生成提示词
 const promptLoading = ref(false);
+let mediaScopeSequence=0;let promptPollTimer:ReturnType<typeof setTimeout>|undefined;
+const captureMediaScope=()=>({sequence:mediaScopeSequence,projectId:Number(project.value?.id),assetId:Number(props.formData.id)});
+const mediaScopeCurrent=(scope:ReturnType<typeof captureMediaScope>)=>generateImageShow.value && scope.sequence===mediaScopeSequence && scope.projectId===Number(project.value?.id) && scope.assetId===Number(props.formData.id);
+function applySavedPrompt(row:any,scope:ReturnType<typeof captureMediaScope>){if(!mediaScopeCurrent(scope))return;props.formData.prompt=String(row.prompt??"");props.formData.version=Number(row.version);manual.receiveSaved({value:String(row.prompt??""),meta:{id:scope.assetId,projectId:scope.projectId,version:Number(row.version),name:row.name??props.formData.name??"",describe:row.describe??props.formData.describe??""}});}
+async function pollPrompt(scope:ReturnType<typeof captureMediaScope>){if(!mediaScopeCurrent(scope))return;try{const {data}=await axios.post("/assets/pollingPromptAssets",{projectId:scope.projectId,ids:[scope.assetId]});if(!mediaScopeCurrent(scope))return;const row=data?.find((item:any)=>Number(item.id)===scope.assetId);if(row){applySavedPrompt(row,scope);if(row.promptErrorReason)window.$message.warning(row.promptErrorReason);return;}}catch{}if(mediaScopeCurrent(scope))promptPollTimer=setTimeout(()=>{void pollPrompt(scope);},3000);}
+watch(generateImageShow,()=>{mediaScopeSequence++;if(promptPollTimer)clearTimeout(promptPollTimer);});
+onBeforeUnmount(()=>{mediaScopeSequence++;if(promptPollTimer)clearTimeout(promptPollTimer);stopPolling();});
 async function generatePrompt() {
+  if(!(await confirmCreativeDrafts({ids:[manual.registrationId],action:"重新生成素材提示词"})))return;
+  const scope=captureMediaScope();
   promptLoading.value = true;
   try {
     const { data } = await axios.post("/assetsGenerate/polishAssetsPrompt", {
@@ -187,12 +210,10 @@ async function generatePrompt() {
       name: props.formData.name,
       describe: props.formData.describe ? props.formData.describe : $t("workbench.assets.noDescription"),
     });
+    if(!mediaScopeCurrent(scope))return;
     window.$message.success($t("workbench.assets.gen.promptSuccess"));
-    if (data.pending) {window.$message.info("提示词任务已接受，可在素材列表查看结果");return;}
-    if (data.assetsId === props.formData.id) {
-      props.formData.version = data.version;
-      props.formData.prompt = data.prompt;
-    }
+    if (data.pending) {window.$message.info("提示词任务已接受，完成后自动载入已保存结果");void pollPrompt(scope);return;}
+    if (Number(data.assetsId)===scope.assetId)applySavedPrompt(data,scope);
   } catch (e: any) {
     window.$message.error(e.message ?? $t("workbench.assets.gen.promptFail"));
   } finally {
@@ -203,6 +224,7 @@ const emit = defineEmits(["update"]);
 const resolution = ref("1K");
 //生成图片
 async function handleGenerate() {
+  if(!(await confirmCreativeDrafts({ids:[manual.registrationId],action:"使用已保存提示词生成图片"})))return;
   if (!props.formData.prompt) {
     window.$message.error($t("workbench.assets.gen.fillPrompt"));
     return;
@@ -311,7 +333,10 @@ function stopPolling() {
 }
 
 async function fetchGeneratedImages() {
-  const { data } = await axios.post("/assets/getImage", { assetsId: props.formData.id });
+  const scope=captureMediaScope();
+  const { data } = await axios.post("/assets/getImage", { assetsId: scope.assetId,projectId:scope.projectId });
+  if(!mediaScopeCurrent(scope))return;
+  if(Number.isSafeInteger(Number(data.version)))props.formData.version=Number(data.version);
   const images = data.tempAssets.map((item: { id: string; filePath: string; state: string; selected?: boolean }) => ({
     id: item.id,
     src: item.filePath,
@@ -369,6 +394,7 @@ function deleteImage(id: string | number, index: number) {
 }
 //确认选择
 async function onClick() {
+  if(!(await confirmCreativeDrafts({ids:[manual.registrationId],action:"选用图片"})))return;
   if (selectedImageIndex.value !== null) {
     const selectedImage = resultImages.value[selectedImageIndex.value];
     const isLocalUpload = !selectedImage.id;

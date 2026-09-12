@@ -121,6 +121,7 @@ import { builtinImageUrl, type BuiltinArtifactTarget, type BuiltinArtifactView }
 import { useLayout } from "./utils/dagre";
 import { useFlowBuilder } from "./utils/flowBuilder";
 import axios from "@/utils/axios";
+import { confirmCreativeDrafts } from "@/utils/creativeDrafts";
 import projectStore from "@/stores/project";
 import builtinAgentStore from "@/stores/builtinAgent";
 const builtinRuns = builtinAgentStore();
@@ -205,6 +206,7 @@ const { layout } = useLayout("mainFlowBox");
 import productionAgentStore from "@/stores/productionAgent";
 const { episodesId, flowData, status } = storeToRefs(productionAgentStore());
 provide("episodesId", episodesId);
+provide("refreshProductionFlow", refFlowData);
 
 const loading = ref(false);
 
@@ -298,6 +300,8 @@ function handleEpisodesChange(value: unknown) {
   if (!Number.isFinite(nextEpisodesId) || nextEpisodesId === episodesId.value) return;
 
   void (async () => {
+    const currentScope = `project:${Number(project.value?.id)}:episode:${Number(episodesId.value)}`;
+    if (!(await confirmCreativeDrafts({ scope: currentScope, action: "切换剧集" }))) return;
     if (!(await confirmEpisodesSwitch())) return;
 
     episodesId.value = nextEpisodesId;
@@ -491,6 +495,8 @@ watch(
 );
 
 async function refFlowData() {
+  const currentScope = `project:${Number(project.value?.id)}:episode:${Number(episodesId.value)}`;
+  if (!(await confirmCreativeDrafts({ scope: currentScope, action: "刷新制作画布" }))) return;
   await productionAgentStore().getFlowData();
   layoutGraph();
 }

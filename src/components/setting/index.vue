@@ -1,7 +1,7 @@
 <template>
-  <t-dialog :header="$t('settings.title')" :footer="false" placement="center" width="1200px" v-model:visible="showSetting">
+  <t-dialog :header="$t('settings.title')" :footer="false" placement="center" width="1200px" v-model:visible="guardedSettingVisible">
     <div class="settingPanel">
-      <t-menu class="settingMenu" v-model:value="activeMenu" :style="{ height: '70vh' }">
+      <t-menu class="settingMenu" v-model:value="guardedActiveMenu" :style="{ height: '70vh' }">
         <t-menu-item v-for="item in menuItems" :key="item.key" :value="item.key">
           <template #icon>
             <t-badge :count="needUpdate && item.key === 'about' ? 1 : 0" dot>
@@ -39,7 +39,12 @@
 
 <script setup lang="ts">
 import settingStore from "@/stores/setting";
+import {confirmCreativeDrafts} from "@/utils/creativeDrafts";
+import userStore from "@/stores/user";
 const { showSetting, activeMenu, needUpdate } = storeToRefs(settingStore());
+const scope=()=>`user:${userStore().user?.id}:prompt-settings`;
+const guardedSettingVisible=computed({get:()=>showSetting.value,set:value=>{if(value)showSetting.value=true;else void confirmCreativeDrafts({scope:scope(),action:"关闭设置"}).then(ok=>{if(ok)showSetting.value=false;});}});
+const guardedActiveMenu=computed({get:()=>activeMenu.value,set:value=>{if(value===activeMenu.value)return;void confirmCreativeDrafts({scope:scope(),action:"切换设置页面"}).then(ok=>{if(ok)activeMenu.value=value;});}});
 
 import uiConfig from "./components/uiConfig.vue";
 import languageConfig from "./components/languageConfig.vue";

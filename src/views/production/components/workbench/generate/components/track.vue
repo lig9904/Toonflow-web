@@ -7,6 +7,8 @@
           <span class="selectedCount" v-if="checkedTrackIds.length">{{ $t("workbench.generate.selected") }} {{ checkedTrackIds.length }} 段</span>
         </div>
         <div class="right f ac">
+          <t-button size="small" variant="outline" :loading="listRefreshing" :disabled="listRefreshing || !scopeReady" @click="emit('refreshList')">刷新片段列表</t-button>
+          <t-button v-if="archivedSharedTracks.length" size="small" variant="outline" @click="archiveVisible = true">历史合并片段（{{ archivedSharedTracks.length }}）</t-button>
           <t-button size="small" variant="outline" :disabled="!checkedTrackIds.length" @click="batchDownloadVideo">{{ $t("workbench.generate.batchDownloadVideo") }}</t-button>
           <t-button size="small" variant="outline" :disabled="!scopeReady || !checkedTrackIds.length || hasPendingPrompt || generateTextLoad" @click="batchGenText" :loading="generateTextLoad">
             {{ $t("workbench.generate.batchGenerateText") }}
@@ -29,7 +31,8 @@
             :checked="track.id != null && checkedTrackIds.includes(track.id)"
             @click.stop
             @change="(val: boolean) => toggleCheck(track.id, val)" />
-          <t-tag class="indexTag" size="small">#{{ index + 1 }}</t-tag>
+          <t-tag class="indexTag" size="small">{{ cardPresentation(track).title }}</t-tag>
+          <t-tag class="kindTag" size="small" variant="light">{{ cardPresentation(track).kindLabel }}</t-tag>
           <t-tag class="selectTag" theme="success" size="small" v-if="track.selectVideoId">已选择</t-tag>
           <t-tag class="promptStateTag" size="small" :theme="promptStateTheme(track)">提示词：{{ promptStateLabel(track) }}</t-tag>
           <t-tooltip :content="trackModeSummary(track)">
@@ -64,15 +67,36 @@
             </template>
           </div>
           <span v-else class="emptyTrack">{{ $t("workbench.generate.emptyTrack", { index: index + 1 }) }}</span>
-          <div class="deleteBtn" @click.stop="confirmDeleteTrack(index)">
-            <i-close size="14" />
-          </div>
+          <t-tooltip v-if="cardPresentation(track).mutationBlockedReason" :content="cardPresentation(track).mutationBlockedReason">
+            <span class="mutationBlocked">!</span>
+          </t-tooltip>
+          <t-button v-if="track.videoList.length && !cardPresentation(track).mutationBlockedReason" class="clearVideosBtn" size="small" variant="text" @click.stop="confirmClearTrackVideos(index)">清空视频</t-button>
+          <t-button v-if="cardPresentation(track).deleteLabel === '删除分镜' && !cardPresentation(track).mutationBlockedReason" class="reloadTrackBtn" size="small" variant="text" @click.stop="confirmReloadTrack(index)">重新载入</t-button>
+          <t-tooltip v-if="cardPresentation(track).deleteLabel && !cardPresentation(track).mutationBlockedReason" :content="cardPresentation(track).deleteLabel">
+            <div class="deleteBtn" :aria-label="cardPresentation(track).deleteLabel" @click.stop="confirmDeleteTrack(index)">
+              <i-close size="14" />
+            </div>
+          </t-tooltip>
         </div>
         <div class="item addItem c" @click="addTrack">
           <i-plus size="36"></i-plus>
         </div>
       </div>
     </t-card>
+    <t-dialog v-model:visible="archiveVisible" header="历史合并片段" :footer="false" width="760px">
+      <div class="archiveList">
+        <t-card v-for="archive in archivedSharedTracks" :key="archive.archiveId" size="small" :title="`原片段 T${archive.sourceTrackId} · ${archiveStoryboardLabels(archive.storyboardIds)}`">
+          <p class="archiveMeta">归档于 {{ archiveTime(archive.archivedAt) }} · 引用版本 {{ archive.selectionRevision }} · 视频 {{ archive.videoCount }} 条</p>
+          <pre class="archivePrompt">{{ archive.prompt || '原片段没有提示词' }}</pre>
+          <div v-if="archive.videos?.length" class="archiveVideos">
+            <div v-for="video in archive.videos" :key="video.id" class="archiveVideo">
+              <video v-if="video.src" :src="video.src" controls preload="metadata" />
+              <span>视频 {{ video.id }} · {{ video.state }}{{ video.errorReason ? ` · ${video.errorReason}` : '' }}</span>
+            </div>
+          </div>
+        </t-card>
+      </div>
+    </t-dialog>
   </div>
 </template>
 
@@ -88,17 +112,31 @@ import { createGenerationIntentStore, shouldRetainGenerationIntent } from "@/uti
 import { createIdempotencyKey } from "@/utils/idempotency";
 import { captureGenerateScope, positiveId, sameGenerateScope, validTrackIds, type PromptGenerationIntent } from "../utils/scope";
 import { captureVideoGenerationSettings, purposeLabel, videoGenerationIntentPayload, videoModeLabel, type VideoReference } from "../utils/videoMode";
+import {
+  buildTrackCardPresentation,
+  freezeClearVideosMutation,
+  freezeDeleteCardMutation,
+  freezeReloadStoryboardMutation,
+  sameCardMutationScope,
+  singleFlight,
+  type CardMutationScope,
+  type FrozenCardMutation,
+  type TrackCardPresentation,
+} from "../utils/trackCards";
 
 const { otherSetting } = storeToRefs(settingStore());
 const generationIntents = createGenerationIntentStore();
 const batchRequestIntents = createGenerationIntentStore<Array<{ videoId: number; trackId: number; jobId?: string; reused?: boolean; promptReview?: VideoPromptReview | null; modeResolution?: VideoModeResolutionView }>>();
 const { project } = storeToRefs(projectStore());
-const { removeCache } = imageListCacheStore();
+const { removeCache, invalidateUrls } = imageListCacheStore();
 const episodesId = inject<Ref<number>>("episodesId")!;
+const refreshProductionFlow = inject<() => Promise<void>>("refreshProductionFlow", async () => undefined);
 const props = defineProps<{
   modelParmas: ModelSetting;
   imageList: UploadItem[];
-  storyboardList: Array<{ trackId?: number | string | null; duration?: number | string | null }>;
+  storyboardList: Array<{ id: number; index: number; version?: number; trackId?: number | string | null; duration?: number | string | null }>;
+  archivedSharedTracks: ArchivedSharedTrack[];
+  listRefreshing: boolean;
   clampDuration: (trackDuration: number) => number;
   sourceDuration: (track: TrackItem | undefined) => number;
   resolveDuration: (trackDuration: number) => { requested: number; duration?: number; resolution: string };
@@ -116,6 +154,8 @@ const props = defineProps<{
   };
   preparePromptGeneration: (ids: readonly number[], scope: { projectId: number; scriptId: number; sequence: number }) => Promise<boolean>;
   prepareReferenceSelection: (ids: readonly number[], scope: { projectId: number; scriptId: number; sequence: number }) => Promise<boolean>;
+  prepareTrackDraft: (track: TrackItem, scope: { projectId: number; scriptId: number; sequence: number }, action: string) => Promise<boolean>;
+  beforeTrackChange: (previousIndex: number, nextIndex: number) => Promise<boolean>;
   referencesForTrack: (track: TrackItem, requireSrc?: boolean) => VideoReference[];
   reviewContextForGeneration: (track: TrackItem, input: { model: string; modeIntentRevision: number; references: VideoReference[]; generation: { duration: number; resolution: string; audio: boolean } }) => string;
 }>();
@@ -130,11 +170,15 @@ const emit = defineEmits<{
   getData: [];
   change: [prevIndex: number];
   saveImageList: [trackId: number];
+  refreshList: [];
 }>();
 const checkAll = ref(false); // 全选状态
-const deleteTrackIntents = new Map<number, { version: number; key: string }>();
+const workspaceMutationIntents = new Map<string, { signature: string; key: string }>();
 const createTrackIntent = ref<{ signature: string; key: string }>();
+const archiveVisible = ref(false);
+const reloadPreparingTrackIds = new Set<number>();
 const disposed = ref(false);
+const trackChangePending = ref(false);
 let batchSequence = 0;
 const hasPendingPrompt = computed(() => checkedTrackIds.value.some((id) => props.promptGenerationGate.isPending(id)));
 
@@ -145,6 +189,26 @@ function trackModeSummary(track: TrackItem): string {
   const purposes = Object.entries(summary.purposes ?? {}).filter(([, count]) => count > 0)
     .map(([purpose, count]) => `${purposeLabel(purpose as any) || purpose}×${count}`).join("、");
   return `模式：${videoModeLabel(track.resolvedMode ?? track.modeIntent ?? "auto")}；参考 ${summary.total} 项${purposes ? `（${purposes}）` : ""}`;
+}
+function cardPresentation(track: TrackItem): TrackCardPresentation {
+  return buildTrackCardPresentation(track, props.storyboardList);
+}
+function blockedGenerationTracks(ids: readonly number[]): TrackItem[] {
+  return trackList.value.filter((track) => ids.includes(track.id) && (track.migrationRequired || Boolean(track.mutationBlockedReason)));
+}
+function warnBlockedGeneration(tracks: readonly TrackItem[]): boolean {
+  if (!tracks.length) return false;
+  window.$message.warning(tracks[0].mutationBlockedReason || "历史合并片段必须先拆分为一镜一片段，当前不能生成");
+  return true;
+}
+function archiveStoryboardLabels(ids: number[]): string {
+  const labels = ids.map((id) => props.storyboardList.find((item) => item.id === id)).filter(Boolean)
+    .map((item) => `S${String(Number(item!.index) + 1).padStart(2, "0")}`);
+  return labels.length ? labels.join("、") : `${ids.length}个分镜`;
+}
+function archiveTime(value: number): string {
+  const date = new Date(Number(value));
+  return Number.isNaN(date.getTime()) ? "未知时间" : date.toLocaleString();
 }
 
 watch(
@@ -214,9 +278,13 @@ function captureVideoCover(src: string) {
   video.load();
 }
 
-function changeIndex(index: number) {
-  if (activeTrackIndex.value == index) return;
+async function changeIndex(index: number) {
+  if (activeTrackIndex.value == index || trackChangePending.value) return;
   const prevIndex = activeTrackIndex.value;
+  trackChangePending.value = true;
+  const allowed = await props.beforeTrackChange(prevIndex, index);
+  trackChangePending.value = false;
+  if (!allowed || activeTrackIndex.value !== prevIndex) return;
   activeTrackIndex.value = index;
   emit("change", prevIndex);
 }
@@ -234,63 +302,202 @@ function promptStateTheme(track: TrackItem): "default" | "primary" | "success" |
   if (track.state === "已完成" || track.prompt?.trim()) return "success";
   return "default";
 }
-/** 删除轨道请求 */
-async function deleteTrack(index: number): Promise<boolean> {
-  const track = trackList.value[index];
-  if (!track) return false;
+function mutationIntent(action: string, trackId: number, payload: object) {
+  const scope = `${action}:${trackId}`;
+  const signature = JSON.stringify(payload);
+  const existing = workspaceMutationIntents.get(scope);
+  const intent = existing?.signature === signature ? existing : { signature, key: createIdempotencyKey(action) };
+  workspaceMutationIntents.set(scope, intent);
+  return { scope, intent };
+}
+
+function currentCardMutationScope(): CardMutationScope | undefined {
+  return captureGenerateScope(project.value?.id, episodesId.value, props.scopeSequence);
+}
+
+async function refreshAfterMutation(scope: CardMutationScope) {
+  if (!sameCardMutationScope(scope, currentCardMutationScope())) return;
+  emit("getData");
+  try { await refreshProductionFlow(); }
+  catch { window.$message.warning("操作已成功，画布刷新失败，请点击页面刷新按钮"); }
+}
+
+function freezeDeleteTarget(scope: CardMutationScope, track: TrackItem, card: TrackCardPresentation): { scope: CardMutationScope; mutation: FrozenCardMutation; key: string; label: "删除分镜" | "删除片段"; title: string } | undefined {
+  if (!card.deleteLabel || card.mutationBlockedReason) {
+    window.$message.error(card.mutationBlockedReason ?? "当前片段不能删除");
+    return undefined;
+  }
   if (!Number.isSafeInteger(track.version) || track.version! < 0) {
     window.$message.error("轨道版本尚未加载，请刷新后重试");
-    return false;
+    return undefined;
   }
-  const trackVersion = Number(track.version);
-  const existing = deleteTrackIntents.get(track.id);
-  const intent: { version: number; key: string } = existing?.version === trackVersion
-    ? existing
-    : { version: trackVersion, key: createIdempotencyKey("track-delete") };
-  deleteTrackIntents.set(track.id, intent);
-  try {
-    await axios.post("/production/workbench/deleteTrack", {
-      id: track.id,
-      projectId: project.value?.id,
-      scriptId: episodesId.value,
-      expectedVersion: intent.version,
-      idempotencyKey: intent.key,
-    });
-    deleteTrackIntents.delete(track.id);
-  } catch (error) {
-    if (!retainMutationIntent(error)) deleteTrackIntents.delete(track.id);
-    throw error;
+  const mutation = freezeDeleteCardMutation({ scope, trackId: track.id, trackVersion: Number(track.version), card });
+  if (!mutation) {
+    window.$message.error(card.deleteLabel === "删除分镜" ? "分镜版本尚未加载，请刷新后重试" : "当前片段不能删除");
+    return undefined;
   }
-  checkedTrackIds.value = checkedTrackIds.value.filter((id) => id !== track.id);
-  // 删除该轨道的图片缓存
-  const pid = project.value?.id;
-  const sid = episodesId.value;
-  if (pid != null && sid != null && track.id != null) {
-    removeCache(pid, sid, track.id);
-  }
-  if (activeTrackIndex.value >= trackList.value.length) {
-    activeTrackIndex.value = trackList.value.length - 1;
-  }
-  return true;
+  const { intent } = mutationIntent(mutation.action, mutation.trackId, mutation.payload);
+  return Object.freeze({ scope, mutation, key: intent.key, label: card.deleteLabel, title: card.title });
 }
-function confirmDeleteTrack(index: number) {
+
+async function confirmDeleteTrack(index: number) {
+  const scope = currentCardMutationScope();
+  const track = trackList.value[index];
+  if (!scope || !track) return;
+  const card = cardPresentation(track);
+  if (!(await props.prepareTrackDraft(track, scope, card.deleteLabel ?? "删除片段"))) return;
+  if (!sameCardMutationScope(scope, currentCardMutationScope()) || !trackList.value.includes(track)) return window.$message.warning("片段列表或剧集已变化，本次删除已取消");
+  const frozen = freezeDeleteTarget(scope, track, card);
+  if (!frozen) return;
+  const submit = singleFlight(async () => {
+    if (!sameCardMutationScope(frozen.scope, currentCardMutationScope())) {
+      window.$message.warning("剧集或项目已切换，本次删除已取消");
+      return;
+    }
+    const intentScope = `${frozen.mutation.action}:${frozen.mutation.trackId}`;
+    try {
+      await axios.post(frozen.mutation.endpoint, { ...frozen.mutation.payload, idempotencyKey: frozen.key });
+      workspaceMutationIntents.delete(intentScope);
+      if (!sameCardMutationScope(frozen.scope, currentCardMutationScope())) return;
+      checkedTrackIds.value = checkedTrackIds.value.filter((id) => id !== frozen.mutation.trackId);
+      removeCache(frozen.scope.projectId, frozen.scope.scriptId, frozen.mutation.trackId);
+      window.$message.success(`${frozen.label}成功`);
+      await refreshAfterMutation(frozen.scope);
+    } catch (error: any) {
+      if (!retainMutationIntent(error)) workspaceMutationIntents.delete(intentScope);
+      if (sameCardMutationScope(frozen.scope, currentCardMutationScope())) window.$message.error(error?.message ?? `${frozen.label}失败，原内容已保留`);
+    }
+  });
   const dialog = DialogPlugin.confirm({
-    header: $t("workbench.generate.del"),
-    body: $t("workbench.generate.delConfirm"),
-    confirmBtn: $t("settings.generate.delConfirmBtn"),
+    header: frozen.label,
+    body: frozen.label === "删除分镜"
+      ? `将同步从画布删除 ${frozen.title} 分镜及其视频生成记录；NAS 中已保存的媒体文件保留。`
+      : "将删除这个自建片段及其视频生成记录；NAS 中已保存的媒体文件保留。",
+    confirmBtn: frozen.label,
     cancelBtn: $t("settings.memory.msg.cancel"),
     onConfirm: async () => {
-      try {
-        if (!(await deleteTrack(index))) return;
-        window.$message.success($t("workbench.generate.delSuccess"));
-        emit("getData");
-      } catch (e: any) {
-        window.$message.error(e.message ?? $t("workbench.cornerScape.cancelGeneration") + "失败");
-      } finally {
-        dialog.destroy();
-      }
+      try { await submit(); }
+      finally { dialog.destroy(); }
     },
   });
+}
+
+function freezeClearTarget(scope: CardMutationScope, track: TrackItem): { scope: CardMutationScope; mutation: FrozenCardMutation; key: string } | undefined {
+  if (track.migrationRequired || Number(track.storyboardCount ?? track.storyboardIds?.length ?? 0) > 1 || track.mutationBlockedReason) {
+    window.$message.error(track.mutationBlockedReason ?? "该历史合并片段完成迁移前不能清空视频");
+    return undefined;
+  }
+  if (!Number.isSafeInteger(track.version) || track.version! < 0) {
+    window.$message.error("轨道版本尚未加载，请刷新后重试");
+    return undefined;
+  }
+  const mutation = freezeClearVideosMutation({ scope, trackId: track.id, trackVersion: Number(track.version) });
+  const { intent } = mutationIntent(mutation.action, mutation.trackId, mutation.payload);
+  return Object.freeze({ scope, mutation, key: intent.key });
+}
+
+async function confirmClearTrackVideos(index: number) {
+  const scope = currentCardMutationScope();
+  const track = trackList.value[index];
+  if (!scope || !track) return;
+  if (!(await props.prepareTrackDraft(track, scope, "清空视频结果"))) return;
+  if (!sameCardMutationScope(scope, currentCardMutationScope()) || !trackList.value.includes(track)) return window.$message.warning("片段列表或剧集已变化，本次清空已取消");
+  const frozen = freezeClearTarget(scope, track);
+  if (!frozen) return;
+  const submit = singleFlight(async () => {
+    if (!sameCardMutationScope(frozen.scope, currentCardMutationScope())) {
+      window.$message.warning("剧集或项目已切换，本次清空已取消");
+      return;
+    }
+    const intentScope = `${frozen.mutation.action}:${frozen.mutation.trackId}`;
+    try {
+      await axios.post(frozen.mutation.endpoint, { ...frozen.mutation.payload, idempotencyKey: frozen.key });
+      workspaceMutationIntents.delete(intentScope);
+      if (!sameCardMutationScope(frozen.scope, currentCardMutationScope())) return;
+      window.$message.success("视频结果已清空");
+      await refreshAfterMutation(frozen.scope);
+    } catch (error: any) {
+      if (!retainMutationIntent(error)) workspaceMutationIntents.delete(intentScope);
+      if (sameCardMutationScope(frozen.scope, currentCardMutationScope())) window.$message.error(error?.message ?? "清空视频结果失败，原内容已保留");
+    }
+  });
+  const dialog = DialogPlugin.confirm({
+    header: "清空视频结果",
+    body: "只清空该片段的视频选择与生成记录，保留分镜、分镜图片、提示词和参考素材；NAS 中已保存的媒体文件保留。",
+    confirmBtn: "清空视频结果",
+    cancelBtn: $t("settings.memory.msg.cancel"),
+    onConfirm: async () => {
+      try { await submit(); }
+      finally { dialog.destroy(); }
+    },
+  });
+}
+
+async function confirmReloadTrack(index: number) {
+  const scope = currentCardMutationScope();
+  const track = trackList.value[index];
+  if (!scope || !track || reloadPreparingTrackIds.has(track.id)) return;
+  const card = cardPresentation(track);
+  if (card.deleteLabel !== "删除分镜" || card.mutationBlockedReason || !card.storyboardId || !Number.isSafeInteger(card.storyboardVersion)) {
+    window.$message.error(card.mutationBlockedReason ?? "当前卡片不是可重新载入的单镜片段");
+    return;
+  }
+  reloadPreparingTrackIds.add(track.id);
+  try {
+    if (!(await props.prepareTrackDraft(track, scope, "重新载入分镜参考"))) return;
+    if (!sameCardMutationScope(scope, currentCardMutationScope()) || !trackList.value.includes(track)) {
+      window.$message.warning("片段列表或剧集已变化，本次重新载入已取消");
+      return;
+    }
+    if (!Number.isSafeInteger(track.version) || !Number.isSafeInteger(track.modeIntentRevision)) {
+      window.$message.error("片段选择版本尚未加载，请刷新后重试");
+      return;
+    }
+    const mutation = freezeReloadStoryboardMutation({
+      scope,
+      trackId: track.id,
+      trackVersion: Number(track.version),
+      storyboardId: card.storyboardId,
+      storyboardVersion: card.storyboardVersion!,
+      modeIntentRevision: Number(track.modeIntentRevision),
+    });
+    const { intent } = mutationIntent(mutation.action, mutation.trackId, mutation.payload);
+    const frozen = Object.freeze({ scope, mutation, key: intent.key, title: card.title });
+    const submit = singleFlight(async () => {
+      if (!sameCardMutationScope(frozen.scope, currentCardMutationScope())) {
+        window.$message.warning("剧集或项目已切换，本次重新载入已取消");
+        return;
+      }
+      const intentScope = `${frozen.mutation.action}:${frozen.mutation.trackId}`;
+      try {
+        const raw: any = await axios.post(frozen.mutation.endpoint, { ...frozen.mutation.payload, idempotencyKey: frozen.key });
+        workspaceMutationIntents.delete(intentScope);
+        if (!sameCardMutationScope(frozen.scope, currentCardMutationScope())) return;
+        const response = raw?.data ?? raw;
+        const refreshedReferences = Array.isArray(response?.references) ? response.references : [];
+        invalidateUrls([
+          { id: Number(frozen.mutation.payload.storyboardId), sources: "storyboard" },
+          ...refreshedReferences.map((reference: any) => ({ id: reference.id, sources: reference.sources })),
+        ]);
+        removeCache(frozen.scope.projectId, frozen.scope.scriptId, frozen.mutation.trackId);
+        window.$message.success(`${frozen.title} 已从当前画布重新载入参考素材`);
+        await refreshAfterMutation(frozen.scope);
+      } catch (error: any) {
+        if (!retainMutationIntent(error)) workspaceMutationIntents.delete(intentScope);
+        if (sameCardMutationScope(frozen.scope, currentCardMutationScope())) window.$message.error(error?.message ?? "重新载入失败，原参考素材与提示词已保留");
+      }
+    });
+    const dialog = DialogPlugin.confirm({
+      header: `重新载入 ${frozen.title}`,
+      body: "将从当前画布重新读取该分镜图片及其关联角色、场景、道具和音色，替换手选参考素材；人工提示词、视频选择和历史视频均保留，提示词会标记为需要核对。",
+      confirmBtn: "重新载入",
+      cancelBtn: $t("settings.memory.msg.cancel"),
+      onConfirm: async () => {
+        try { await submit(); }
+        finally { dialog.destroy(); }
+      },
+    });
+  } finally { reloadPreparingTrackIds.delete(track.id); }
 }
 async function addTrack() {
   const { data: modelData } = await axios.post("/modelSelect/getModelDetail", { modelId: props.modelParmas.model });
@@ -352,6 +559,7 @@ async function batchGenText() {
   const requestSequence = ++batchSequence;
   const trackData: any[] = [];
   const selectedIds = validTrackIds(checkedTrackIds.value, trackList.value);
+  if (warnBlockedGeneration(blockedGenerationTracks(selectedIds))) return;
   const generationSnapshot = captureVideoGenerationSettings(props.modelParmas);
   const durationByTrack = new Map(trackList.value.filter((track) => selectedIds.includes(positiveId(track.id) ?? -1)).map((track) => {
     const sourceDuration = props.sourceDuration(track);
@@ -471,6 +679,7 @@ function batchGenVideo() {
       if (!scope || !props.scopeReady || disposed.value) return;
 
       const selectedIds = validTrackIds(checkedTrackIds.value, trackList.value);
+      if (warnBlockedGeneration(blockedGenerationTracks(selectedIds))) return;
       checkedTrackIds.value = selectedIds;
       const checkedTrackData = trackList.value.filter((track) => selectedIds.includes(positiveId(track.id) ?? -1));
       const notHasPrompt = checkedTrackData.filter((i) => !i.prompt);
@@ -707,6 +916,12 @@ onUnmounted(() => {
         left: 4px;
         z-index: 2;
       }
+      .kindTag {
+        position: absolute;
+        bottom: 30px;
+        left: 4px;
+        z-index: 2;
+      }
       .selectTag {
         position: absolute;
         bottom: 4px;
@@ -788,6 +1003,33 @@ onUnmounted(() => {
           background: rgba(0, 0, 0, 0.8);
         }
       }
+      .mutationBlocked {
+        position: absolute;
+        top: 32px;
+        right: 6px;
+        z-index: 3;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: var(--td-warning-color-6);
+        color: #fff;
+        line-height: 18px;
+        text-align: center;
+      }
+      .clearVideosBtn {
+        position: absolute;
+        right: 4px;
+        bottom: 32px;
+        z-index: 3;
+        background: rgba(255, 255, 255, 0.88);
+      }
+      .reloadTrackBtn {
+        position: absolute;
+        right: 4px;
+        bottom: 60px;
+        z-index: 3;
+        background: rgba(255, 255, 255, 0.88);
+      }
       &:hover .deleteBtn {
         display: flex;
       }
@@ -804,6 +1046,37 @@ onUnmounted(() => {
       user-select: none;
       display: block;
     }
+  }
+  .archiveList {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: 68vh;
+    overflow-y: auto;
+  }
+  .archiveMeta {
+    color: var(--td-text-color-secondary);
+    font-size: 12px;
+  }
+  .archivePrompt {
+    white-space: pre-wrap;
+    max-height: 180px;
+    overflow: auto;
+    padding: 10px;
+    border-radius: 6px;
+    background: var(--td-bg-color-secondarycontainer);
+  }
+  .archiveVideos {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 10px;
+  }
+  .archiveVideo {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    video { width: 100%; max-height: 180px; background: #000; }
   }
 }
 </style>
