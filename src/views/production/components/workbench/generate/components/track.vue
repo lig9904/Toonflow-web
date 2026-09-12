@@ -73,9 +73,9 @@
           <t-button v-if="track.videoList.length && !cardPresentation(track).mutationBlockedReason" class="clearVideosBtn" size="small" variant="text" @click.stop="confirmClearTrackVideos(index)">清空视频</t-button>
           <t-button v-if="cardPresentation(track).deleteLabel === '删除分镜' && !cardPresentation(track).mutationBlockedReason" class="reloadTrackBtn" size="small" variant="text" @click.stop="confirmReloadTrack(index)">重新载入</t-button>
           <t-tooltip v-if="cardPresentation(track).deleteLabel && !cardPresentation(track).mutationBlockedReason" :content="cardPresentation(track).deleteLabel">
-            <div class="deleteBtn" :aria-label="cardPresentation(track).deleteLabel" @click.stop="confirmDeleteTrack(index)">
+            <button type="button" class="deleteBtn" :aria-label="cardPresentation(track).deleteLabel" @click.stop="confirmDeleteTrack(index)">
               <i-close size="14" />
-            </div>
+            </button>
           </t-tooltip>
         </div>
         <div class="item addItem c" @click="addTrack">
@@ -956,7 +956,7 @@ onUnmounted(() => {
       }
       .promptFailureMark {
         position: absolute;
-        top: 6px;
+        bottom: 6px;
         right: 6px;
         z-index: 2;
         width: 16px;
@@ -998,16 +998,19 @@ onUnmounted(() => {
         position: absolute;
         top: 4px;
         right: 4px;
-        width: 20px;
-        height: 20px;
+        width: 24px;
+        height: 24px;
+        border: 0;
+        padding: 0;
         border-radius: 50%;
-        background: rgba(0, 0, 0, 0.5);
+        background: rgba(0, 0, 0, 0.65);
         color: #fff;
-        display: none;
+        display: flex;
         align-items: center;
         justify-content: center;
         cursor: pointer;
-        z-index: 1;
+        z-index: 4;
+        &:focus-visible { outline: 2px solid var(--td-brand-color); outline-offset: 2px; }
         &:hover {
           background: rgba(0, 0, 0, 0.8);
         }
