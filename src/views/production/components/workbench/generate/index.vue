@@ -1312,6 +1312,8 @@ watch(inputStateKey,()=>{if(preflightReports.value.length)preflightStale.value=t
 onBeforeUnmount(()=>{if(preflightTimer)clearTimeout(preflightTimer);++preflightSequence;});
 async function inspectVideoBatch(request:any):Promise<Map<number,string>|false>{
  await nextTick();
+ // An explicit batch check supersedes any scheduled single-track refresh.
+ if(preflightTimer){clearTimeout(preflightTimer);preflightTimer=undefined;}
  const normalized={projectId:request.projectId,scriptId:request.scriptId,model:request.model,resolution:request.resolution,audio:request.audio,trackData:request.trackData.map((t:any)=>({trackId:t.trackId,prompt:t.prompt??"",duration:t.duration,references:t.references,modeIntentRevision:t.modeIntentRevision??0}))};
  const key=preflightInputKey(normalized),scope=preflightScopeKey(),state=inputStateKey.value,sequence=++preflightSequence;
  normalized.trackData=normalized.trackData.map((t:any)=>{const approval=preflightApprovals.get(t.trackId);return {...t,...(approval?.key===key?{acknowledgement:approval.fingerprint}:{})};});
