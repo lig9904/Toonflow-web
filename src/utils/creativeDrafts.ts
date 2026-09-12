@@ -51,3 +51,18 @@ export async function confirmCreativeDrafts(options: CreativeDraftDecision = {})
   }).finally(() => { pendingDecision = undefined; });
   return pendingDecision;
 }
+
+/** A cleared document is a deliberate save action, never an implicit close action. */
+export function confirmClearCreativeDraft(label: string): Promise<boolean> {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (value: boolean) => { if (settled) return; settled = true; dialog.destroy(); resolve(value); };
+    const dialog = DialogPlugin.confirm({
+      header: `确认清空${label}`,
+      body: "这次保存会将原有正文清空。关闭编辑窗口或取消此提示均不会保存空内容。",
+      confirmBtn: "确认清空并保存", cancelBtn: "保留原内容",
+      closeOnOverlayClick: false, closeOnEscKeydown: false, confirmOnEnter: false,
+      onConfirm: () => finish(true), onCancel: () => finish(false), onClose: () => finish(false),
+    });
+  });
+}

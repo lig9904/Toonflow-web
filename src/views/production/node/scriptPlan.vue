@@ -76,7 +76,7 @@ const manual = useManualCreativeDraft<string, { projectId:number; scriptId:numbe
   commit: async (value, meta) => {
     if (Number(projectStore().project?.id)!==meta.projectId || editorStore.episodesId!==meta.scriptId || scriptPlan.value!==meta.base) throw new Error("已保存内容或编辑对象已更新，草稿已保留；请重新核对后保存");
     const snapshot = {...meta.snapshot,scriptPlan:value};
-    const response:any=await axios.post("/production/saveFlowData",{projectId:meta.projectId,episodesId:meta.scriptId,expectedPlanningVersion:meta.version,data:snapshot});
+    const response:any=await axios.post("/production/saveFlowData",{projectId:meta.projectId,episodesId:meta.scriptId,expectedPlanningVersion:meta.version,saveIntent:"manual",field:"scriptPlan",allowClear:!value.trim(),data:snapshot});
     const version=Number(response.data?.planningVersion); if(!Number.isFinite(version))throw new Error("保存响应缺少版本");
     return {value,meta:{...meta,version,base:value,snapshot}};
   },

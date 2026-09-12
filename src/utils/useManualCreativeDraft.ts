@@ -1,5 +1,5 @@
 import { computed, onBeforeUnmount, ref, watch, type Ref } from "vue";
-import { confirmCreativeDrafts, registerCreativeDraft } from "./creativeDrafts";
+import { confirmCreativeDrafts, confirmClearCreativeDraft, registerCreativeDraft } from "./creativeDrafts";
 import userStore from "@/stores/user";
 import {acceptGeneratedSaved,discardManualDraft,sameCreativeDraftScope} from "./manualDraftState";
 export interface ManualCreativeSnapshot<T, M> { value: T; meta: M }
@@ -30,7 +30,7 @@ export function useManualCreativeDraft<T, M>(options: {
       else sessionStorage.removeItem(storageKey());
     } catch { /* Keep the in-memory draft if browser storage is unavailable. */ }
   };
-  watch(draft, () => { if (active.value) { if (!saving.value) status.value = dirty.value ? "未保存草稿" : "已保存"; persist(); } }, {deep:true});
+  watch(draft, () => { if (active.value) { if (!saving.value) status.value = dirty.value ? "未保存草稿" : "已保存"; persist(); } }, {deep:true,flush:"sync"});
   async function open(): Promise<boolean> {
     if (active.value && dirty.value && !(await confirmCreativeDrafts({ids:[registrationId],action:"打开另一份内容"}))) return false;
     const id = options.id(), scope = options.scope(), request = ++sequence;
@@ -53,6 +53,10 @@ export function useManualCreativeDraft<T, M>(options: {
     saving.value = true; status.value = "保存中…"; error.value = "";
     inFlight = (async () => {
       try {
+        if (typeof value === "string" && !value.trim() && typeof baseline.value === "string" && baseline.value.trim()) {
+          if (!(await confirmClearCreativeDraft(options.label))) { status.value = "未保存草稿"; return false; }
+          if (!sameCreativeDraftScope(capturedScope,currentScope()) || JSON.stringify(value)!==JSON.stringify(draft.value)) return false;
+        }
         const saved = await options.commit(value, capturedMeta);
         if (editingId !== id || !sameCreativeDraftScope(capturedScope,currentScope())) return false;
         baseline.value = copy(saved.value); meta = copy(saved.meta);
@@ -94,9 +98,15 @@ export function useManualCreativeDraft<T, M>(options: {
     if(latestSaved)options.onSaved?.(latestSaved);
     error.value="";status.value="已放弃修改并采用最新已保存内容";persist();
   }
-  async function close(): Promise<boolean> {
-    if (!(await confirmCreativeDrafts({ids:[registrationId],action:"关闭编辑窗口"}))) return false;
-    active.value = false; return true;
+  let closing: Promise<boolean> | undefined;
+  function close(): Promise<boolean> {
+    // TDialog emits close/cancel/update:visible for the same click; one decision only.
+    if (closing) return closing;
+    closing = (async () => {
+      if (!(await confirmCreativeDrafts({ids:[registrationId],action:"关闭编辑窗口"}))) return false;
+      active.value = false; return true;
+    })().finally(() => { closing = undefined; });
+    return closing;
   }
   const unregister = registerCreativeDraft({id:registrationId,label:options.label,scope:()=>editingScope,isDirty:()=>active.value && dirty.value,save,discard});
   const visible = computed({get:()=>active.value,set:value=>{if(value)active.value=true;else void close();}});

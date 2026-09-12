@@ -1,3 +1,4 @@
+import { nextQueuedPlanningVersion } from "@/utils/planningSaveQueue";
 import axios from "@/utils/axios";
 import projectStore from "@/stores/project";
 import settingStore from "@/stores/setting";
@@ -54,7 +55,7 @@ function makeProductionAgentStore(projectId: string) {
     const builtinRuns = builtinAgentStore();
     let flowLoadSequence = 0;
     let workflowRefreshSequence = 0;
-    type PendingFlowSave = { scriptId: number; expectedPlanningVersion: number; loadSequence: number; snapshot: FlowData };
+    type PendingFlowSave = { scriptId: number; expectedPlanningVersion: number; loadSequence: number; snapshot: FlowData; field?: "scriptPlan" | "storyboardTable" };
     let pendingFlowSave: PendingFlowSave | null = null;
     const readPendingFlowSave = (): PendingFlowSave | null => pendingFlowSave;
     let flowSavePromise: Promise<void> | null = null;
@@ -136,7 +137,8 @@ function makeProductionAgentStore(projectId: string) {
         //   }
         // }
         if (status == "complete") {
-          throttledFn();
+          if ((tag === "scriptPlan" || tag === "storyboardTable") && String(value ?? "").trim()) void setFlowData(episodesId.value, tag);
+          else throttledFn();
         }
       },
     });
@@ -289,7 +291,7 @@ function makeProductionAgentStore(projectId: string) {
           if (isCurrentEpisode) window.$message.warning("规划版本尚未读取，暂不保存");
           continue;
         }
-        const expectedPlanningVersion = save.expectedPlanningVersion === planningVersion.value ? save.expectedPlanningVersion : planningVersion.value;
+        const expectedPlanningVersion = save.expectedPlanningVersion;
         try {
           flowSaveStatus.value = "saving";
           flowSaveError.value = "";
@@ -298,6 +300,8 @@ function makeProductionAgentStore(projectId: string) {
             data: save.snapshot,
             episodesId: save.scriptId ?? episodesId.value,
             expectedPlanningVersion,
+            saveIntent: save.field ? "generated" : "order",
+            field: save.field,
           });
           const data = response?.data ?? response;
           const nextVersion = Number(data?.planningVersion);
@@ -305,7 +309,11 @@ function makeProductionAgentStore(projectId: string) {
             throw new Error("保存响应缺少 planningVersion");
           }
           if (save.scriptId === episodesId.value && save.scriptId === planningEpisodeId.value && save.loadSequence === flowLoadSequence) {
-            planningVersion.value = nextVersion;
+            const queued = readPendingFlowSave();
+            if (queued && queued.scriptId === save.scriptId && queued.loadSequence === save.loadSequence) {
+              queued.expectedPlanningVersion = nextQueuedPlanningVersion(queued.expectedPlanningVersion, save.expectedPlanningVersion, nextVersion, planningVersion.value);
+            }
+            planningVersion.value = Math.max(planningVersion.value ?? 0, nextVersion);
             applyStoryboardVersions(data?.storyboardVersions);
             flowSaveStatus.value = "saved";
           }
@@ -327,7 +335,7 @@ function makeProductionAgentStore(projectId: string) {
       }
     }
 
-    async function setFlowData(scriptId?: number): Promise<void> {
+    async function setFlowData(scriptId?: number, field?: "scriptPlan" | "storyboardTable"): Promise<void> {
       const saveScriptId = scriptId ?? episodesId.value;
       if (saveScriptId == null || planningVersion.value == null || planningEpisodeId.value !== saveScriptId) {
         flowSaveStatus.value = "error";
@@ -340,14 +348,20 @@ function makeProductionAgentStore(projectId: string) {
         expectedPlanningVersion: planningVersion.value,
         loadSequence: flowLoadSequence,
         snapshot: cloneFlowData(flowData.value),
+        field,
       };
+      await startFlowSaveQueue();
+    }
+
+    function startFlowSaveQueue(): Promise<void> {
       if (!flowSavePromise) {
         flowSavePromise = flushFlowSaves().finally(() => {
           flowSavePromise = null;
-          if (pendingFlowSave && planningVersion.value != null) void setFlowData(pendingFlowSave.scriptId);
+          // Drain the original captured request; never rebuild it with a newer version.
+          if (pendingFlowSave) void startFlowSaveQueue();
         });
       }
-      await flowSavePromise;
+      return flowSavePromise;
     }
 
     async function requestFlowData(scriptId: number): Promise<{ data: FlowData; planningVersion?: number }> {
