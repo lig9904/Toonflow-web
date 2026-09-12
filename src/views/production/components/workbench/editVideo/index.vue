@@ -93,6 +93,7 @@
           </template> -->
           <template #scale-append>
             <span class="timelineSaveStatus" :class="`is-${autoSaveStatus}`">{{ autoSaveStatusLabel }}</span>
+            <t-button theme="primary" variant="outline" :loading="autoSaveStatus === 'saving'" :disabled="autoSaveStatus === 'saved' || autoSaveStatus === 'saving'" @click="saveTimelineDraft">保存时间线</t-button>
             <t-button theme="danger" @click="handleExport" :loading="isExporting" :title="$t('workbench.production.editVideo.exportProject')">
               <template #icon><i-export size="16" style="margin-right: 4px" /></template>
               {{ isExporting ? $t("workbench.production.editVideo.rendering") : $t("workbench.production.editVideo.exportVideo") }}
@@ -109,6 +110,7 @@ import mediaLibrary from "./mediaLibrary.vue";
 import videoPreview from "./videoPreview.vue";
 import propertyPanel from "./propertyPanel.vue";
 import axios from "@/utils/axios";
+import {registerCreativeDraft} from "@/utils/creativeDrafts";
 import { createIdempotencyKey } from "@/utils/idempotency";
 import { Splitpanes, Pane } from "splitpanes";
 import "vue-clip-track/style.css";
@@ -238,7 +240,7 @@ let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let autoSaveInFlight = false;
 let autoSaveDirty = false;
 let hydratingTimeline = true;
-let unmountingTimeline = false;
+let savedTimeline = {tracks: JSON.parse(JSON.stringify(props.initialTracks)) as Track[]};
 let saveIntent: { signature: string; key: string } | null = null;
 
 function localDraftKey() {
@@ -284,8 +286,9 @@ function timelinePayload() {
   return { tracks: JSON.parse(JSON.stringify(tracksStore.tracks)) };
 }
 
-async function flushTimelineAutosave() {
-  if (!props.projectId || !props.scriptId || hydratingTimeline || !autoSaveDirty || autoSaveInFlight) return;
+async function saveTimelineDraft():Promise<boolean> {
+  if (!props.projectId || !props.scriptId || hydratingTimeline || autoSaveInFlight) return false;
+  if(!autoSaveDirty)return true;
   autoSaveInFlight = true;
   autoSaveDirty = false;
   autoSaveStatus.value = "saving";
@@ -303,32 +306,23 @@ async function flushTimelineAutosave() {
     });
     const result = response?.data ?? response;
     timelineVersion.value = Number(result.version ?? timelineVersion.value);
+    savedTimeline = timeline;
     clearLocalDraftIfCurrent(signature);
     saveIntent = null;
-    autoSaveStatus.value = "saved";
+    autoSaveStatus.value = autoSaveDirty ? "pending" : "saved";
+    return !autoSaveDirty;
   } catch (error: any) {
     autoSaveDirty = true;
     autoSaveStatus.value = "error";
     if (error?.status === 409 || error?.code === "VERSION_CONFLICT") window.$message.error("时间线已被其他成员修改，已保留本地编辑");
-    else console.error("Failed to autosave edit timeline:", error);
+    else window.$message.error(error?.message || "时间线保存失败，草稿已保留");
+    return false;
   } finally {
     autoSaveInFlight = false;
-    if (autoSaveDirty && autoSaveStatus.value !== "error") {
-      if (unmountingTimeline) void flushTimelineAutosave();
-      else scheduleTimelineAutosave();
-    }
+    if (autoSaveDirty && autoSaveStatus.value !== "error") autoSaveStatus.value = "pending";
   }
 }
 
-function scheduleTimelineAutosave() {
-  if (!props.projectId || !props.scriptId || hydratingTimeline) return;
-  autoSaveStatus.value = "pending";
-  if (autoSaveTimer) clearTimeout(autoSaveTimer);
-  autoSaveTimer = setTimeout(() => {
-    autoSaveTimer = null;
-    void flushTimelineAutosave();
-  }, 700);
-}
 
 watch(
   () => tracksStore.tracks,
@@ -336,7 +330,7 @@ watch(
     if (hydratingTimeline) return;
     autoSaveDirty = true;
     saveLocalDraft(timelinePayload(), timelineVersion.value);
-    scheduleTimelineAutosave();
+    autoSaveStatus.value = "pending";
   },
   { deep: true, flush: "post" },
 );
@@ -613,6 +607,7 @@ async function initializeTracks() {
   await loadInitialAudioWaveforms(tracksStore);
   nextTick(() => {
     hydratingTimeline = false;
+    if(props.initialTimelineSaved===false && props.initialTracks.some(t=>t.clips.length)){autoSaveDirty=true;autoSaveStatus.value="pending";}
   });
 }
 
@@ -631,11 +626,23 @@ onMounted(async () => {
   }
 });
 
+const unregisterTimelineDraft=registerCreativeDraft({
+ id:`timeline:${props.projectId}:${props.scriptId}`,
+ scope:()=>`project:${Number(props.projectId)}:episode:${Number(props.scriptId)}`,
+ label:"剪辑时间线",isDirty:()=>autoSaveDirty||autoSaveInFlight,
+ save:saveTimelineDraft,
+ discard:async()=>{
+   if(autoSaveInFlight)throw new Error("时间线正在保存，请稍后再试");
+   const discarded=JSON.stringify(timelinePayload());hydratingTimeline=true;tracksStore.reset();
+   for(const track of savedTimeline.tracks)tracksStore.addTrack(JSON.parse(JSON.stringify(track)));
+   playbackStore.setDuration(getTracksTimelineEnd(savedTimeline.tracks)||60);playbackStore.seekTo(0);historyStore.initialize();
+   await nextTick();autoSaveDirty=false;autoSaveStatus.value="saved";hydratingTimeline=false;clearLocalDraftIfCurrent(discarded);
+ },
+});
 onBeforeUnmount(() => {
-  unmountingTimeline = true;
   if (autoSaveTimer) clearTimeout(autoSaveTimer);
   if (autoSaveDirty) saveLocalDraft(timelinePayload(), timelineVersion.value);
-  void flushTimelineAutosave();
+  unregisterTimelineDraft();
 });
 
 onUnmounted(() => {
