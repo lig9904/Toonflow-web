@@ -211,7 +211,13 @@
                   {{ audio.name }}
                 </t-tag>
               </div>
-              <div v-else class="assets-empty">{{ $t("workbench.cornerScape.noAudio") }}</div>
+              <div v-for="family in editForm.relepedAudio" :key="'voice-'+family.id" style="margin-top:8px">
+                <div>{{ family.voiceStale ? '固定声音参考已变化，请重新选择并保存' : family.voicePinned ? '已固定声音参考' : '旧绑定：默认取组内第一份，建议选择并固定' }}</div>
+                <t-select :value="family.voiceReference?.id" :options="(family.voiceOptions||[]).map(v=>({label:v.name,value:v.id}))" :disabled="voiceSaving" placeholder="选择声音参考片段" @change="value=>saveFixedVoice(Number(value),family)" />
+                <audio v-if="family.voiceReference?.filePath" :src="voicePreviewUrl(family.voiceReference.filePath)" controls preload="none" style="max-width:100%;height:34px;margin-top:6px" />
+                <small>此声音供后续片段参考，不保证生成结果完全一致；已有片段可用“重新载入”更新参考。</small>
+              </div>
+              <div v-if="!editForm.relepedAudio.length" class="assets-empty">{{ $t("workbench.cornerScape.noAudio") }}</div>
             </div>
           </t-form-item>
           <t-form-item>
@@ -252,6 +258,7 @@ interface Image {
   filePath: string;
   id: number;
 }
+interface RoleVoiceFamily { id:number;name:string;voicePinned?:boolean;voiceStale?:boolean;voiceReference?:{id:number;name:string;filePath:string;version:number}|null;voiceOptions?:Array<{id:number;name:string;filePath:string;version:number}> }
 interface DataItem {
   id: number;
   version: number;
@@ -268,7 +275,7 @@ interface DataItem {
   historyImages: Image[];
   errorReason: string;
   promptErrorReason: string;
-  relepedAudio: { id: number; name: string }[];
+  relepedAudio: RoleVoiceFamily[];
   audioBindState: string;
 }
 
@@ -466,7 +473,7 @@ const editForm = reactive({
   name: "",
   describe: "",
   promptState: "",
-  relepedAudio: [] as { id: number; name: string }[],
+  relepedAudio: [] as RoleVoiceFamily[],
 });
 
 const manual=useManualCreativeDraft<string,{projectId:number;id:number;version?:number;name:string;describe:string}>({label:"素材提示词",initial:"",id:()=>`corner-prompt:${project.value?.id}:${currentItem.value?.id}`,scope:()=>`project:${project.value?.id}`,
@@ -972,6 +979,16 @@ async function removeAudio(id: number) {
   } catch (error: any) {
     window.$message.error(error.message ?? "音色清除失败；当前草稿已保留");
   }
+}
+const voiceSaving=ref(false);
+function voicePreviewUrl(path:string){return new URL(`/oss/${path.replace(/^\//,"")}`,settingStore().baseUrl||location.origin).href;}
+async function saveFixedVoice(id:number,family:RoleVoiceFamily){
+ const voice=family.voiceOptions?.find(v=>v.id===id);if(!voice||!currentItem.value||voiceSaving.value)return;
+ voiceSaving.value=true;
+ try{const {data}=await axios.post("/cornerScape/updateAssetsAudio",{projectId:Number(project.value?.id),roleAssetId:currentItem.value.id,expectedVersion:currentItem.value.version,audioIds:[id],audioVersions:[{id,expectedVersion:voice.version}],idempotencyKey:createIdempotencyKey("fixed-voice")});
+ currentItem.value.version=Number(data.binding.version);currentItem.value.relepedAudio=data.binding.audioFamilies;editForm.relepedAudio=data.binding.audioFamilies;
+ const row=dataList.value.find(item=>item.id===currentItem.value!.id);if(row)Object.assign(row,{version:currentItem.value.version,relepedAudio:data.binding.audioFamilies});window.$message.success("固定声音参考已保存");
+ }catch(error:any){window.$message.error(error?.message||"声音参考保存失败");}finally{voiceSaving.value=false;}
 }
 async function selectAudio() {
   const assets = await openAssetsSelector({
