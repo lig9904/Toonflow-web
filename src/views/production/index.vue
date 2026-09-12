@@ -94,7 +94,7 @@
         <rightChatBox :title="title" v-model="flowData" @close="openShowVisible = false" @navigate-artifact="openBuiltinArtifact" />
       </transition>
     </div>
-    <t-guide v-model="current" :steps="steps" @finish="() => (current = -1)" />
+    <t-guide v-if="current >= 0" v-model="current" :steps="steps" @finish="() => (current = -1)" />
     <t-tag variant="outline" class="fps" v-if="!openShowVisible">{{ fps }}</t-tag>
     <t-image-viewer v-if="artifactPreviewVisible" v-model:visible="artifactPreviewVisible" :images="artifactPreviewImages" />
   </VueFlow>

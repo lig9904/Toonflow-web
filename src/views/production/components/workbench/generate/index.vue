@@ -103,6 +103,7 @@
 <script setup lang="ts">
 import type { Ref } from "vue";
 import VideoPreflightPanel from "@/components/reviews/videoPreflightPanel.vue";
+import {isResolvedReviewInput} from "@/utils/videoReviewInput";
 import { createSavedVideoPromptStore, draftAfterPromptSave } from "@/utils/videoPromptSaveState";
 import { preflightInputKey, acceptPreflightResponse } from "@/utils/videoPreflightState";
 import { inject } from "vue";
@@ -1207,7 +1208,7 @@ async function getTrackPromptList() {
       scriptId: scope.scriptId,
       trackIds: [...requestedIds],
       jobIds,
-      reviewInputs: trackList.value.map(reviewInputForTrack),
+      reviewInputs: trackList.value.map(reviewInputForTrack).filter(input=>isResolvedReviewInput(input)),
     });
     if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     if (Array.isArray(data)) {
