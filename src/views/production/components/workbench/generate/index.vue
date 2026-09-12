@@ -1361,13 +1361,13 @@ async function locatePreflightImage(target:any,repair:boolean){
   height: calc(100vh - 120px);
   gap: 16px;
   overflow-y: auto;
-  .referenceImage {
-  }
-  .modelSelect {
+  > .referenceImage, > .modelSelect, > .preflightPanel, > .track, > .scopeNotice {
+    flex-shrink: 0;
   }
   .generate {
-    flex: 1;
-    min-height: 0;
+    // Keep both editors usable even when references or inspection results grow.
+    flex: 1 0 320px;
+    min-height: 320px;
     width: 100%;
     gap: 5px;
     .prompt {
