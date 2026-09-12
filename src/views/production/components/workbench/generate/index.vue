@@ -37,11 +37,12 @@
           <template #actions>
             <t-tag v-if="currentPromptDirty" size="small" theme="warning">未保存草稿</t-tag>
             <t-button size="small" variant="outline" :disabled="!currentPromptNeedsSave || currentPromptSaving" :loading="currentPromptSaving" @click="saveCurrentPrompt">{{ currentPromptDirty ? '保存提示词' : '保存并确认参考' }}</t-button>
-            <t-button size="small" class="genTextbtn" :disabled="!scopeReady || currentPromptPending || currentTrack.state == '生成中'" :loading="currentPromptPending || currentTrack.state == '生成中'" @click="genText">
+            <t-button size="small" class="genTextbtn" :disabled="!scopeReady || !canGenerateStoryboardPrompt(currentTrack, storyboardList) || currentPromptPending || currentTrack.state == '生成中'" :loading="currentPromptPending || currentTrack.state == '生成中'" @click="genText">
               {{ $t("workbench.generate.generateText") }}
             </t-button>
           </template>
           <div class="promptData fc">
+            <t-alert v-if="!canGenerateStoryboardPrompt(currentTrack, storyboardList)" theme="info" title="此片段未绑定独立源分镜，不能从分镜生成提示词。可手动填写提示词并保存后生成视频。" />
             <div class="promptInput">
               <promptEditor v-model="currentPromptDraft" :references="references" :placeholder="$t('workbench.generate.promptPlaceholder')" />
             </div>
@@ -116,7 +117,7 @@ import { createIdempotencyKey } from "@/utils/idempotency";
 import { captureGenerateScope, positiveId, sameGenerateScope, type GenerateScope, type PromptGenerationIntent } from "./utils/scope";
 import { confirmCreativeDrafts, registerCreativeDraft } from "@/utils/creativeDrafts";
 import { createVideoPromptDraft, normalizeVideoPromptDraft, rebaseVideoPromptDraft, videoPromptDraftConflicts, type VideoPromptDraftRecord } from "./utils/videoPromptDraft";
-import { buildTrackCardPresentation } from "./utils/trackCards";
+import { buildTrackCardPresentation, canGenerateStoryboardPrompt, shouldNotifyPromptFailure } from "./utils/trackCards";
 import {
   buildVideoReferences,
   buildResolvedReferencePreviews,
@@ -945,6 +946,7 @@ async function genText() {
   const currentTrackId = positiveId(track?.id);
   if (!scope || !scopeReady.value || !track || currentTrackId == null || track.state === "生成中") return;
   if (track.migrationRequired || track.mutationBlockedReason) return window.$message.warning(track.mutationBlockedReason || "历史合并片段必须先拆分为一镜一片段，当前不能生成");
+  if (!canGenerateStoryboardPrompt(track, storyboardList.value)) return window.$message.warning(`${buildTrackCardPresentation(track, storyboardList.value).title}：没有独立源分镜，请手动填写提示词并保存`);
   const generationSnapshot = captureVideoGenerationSettings(modelParmas.value);
   if (!(await resolveTrackDraft(track, scope, "重新生成提示词"))) return;
   if (!(await saveTrackReferences(track, scope))) return;
@@ -992,7 +994,7 @@ async function genText() {
     if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     track.state = "生成失败";
     track.promptGenerationContext = undefined;
-    window.$message.error((e as Error)?.message ?? "提示词生成失败");
+    window.$message.error(`${buildTrackCardPresentation(track, storyboardList.value).title}：${(e as Error)?.message ?? "提示词生成失败"}`);
     const status = Number((e as any)?.status ?? (e as any)?.response?.status);
     promptGenerationGate.finish(currentTrackId, !(Number.isSafeInteger(status) && status < 500));
   }
@@ -1245,8 +1247,8 @@ async function getTrackPromptList() {
           if (findData.reason !== (item?.reason ?? "")) findData.reason = item?.reason ?? "";
           if (terminal && (pending || (submittedIntent && item.idempotencyKey === submittedIntent.key))) promptGenerationGate.finish(findId);
           if (terminal) findData.promptGenerationContext = undefined;
-          if (item.state === "生成失败" && (previousState !== "生成失败" || previousJobId !== item.jobId) && (item.jobId || previousState === "生成中")) {
-            window.$message.error(`提示词生成失败，${item.reason ?? "未知原因"}`);
+          if (shouldNotifyPromptFailure({ state: item.state, previousState, previousJobId, jobId: item.jobId, submitted: pending?.submitted, ownedJobId: pending?.jobId, requestMatches: !!submittedIntent && item.idempotencyKey === submittedIntent.key })) {
+            window.$message.error(`${buildTrackCardPresentation(findData, storyboardList.value).title}：本次提示词生成失败${item.prompt?.trim() ? "（原提示词已保留）" : ""}，${item.reason ?? "未知原因"}`);
           }
         }
       });

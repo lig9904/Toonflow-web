@@ -66,7 +66,7 @@
               </template>
             </template>
           </div>
-          <span v-else class="emptyTrack">{{ $t("workbench.generate.emptyTrack", { index: index + 1 }) }}</span>
+          <span v-else class="emptyTrack">{{ cardPresentation(track).deleteLabel === '删除片段' ? '自建空片段' : $t("workbench.generate.emptyTrack", { index: index + 1 }) }}</span>
           <t-tooltip v-if="cardPresentation(track).mutationBlockedReason" :content="cardPresentation(track).mutationBlockedReason">
             <span class="mutationBlocked">!</span>
           </t-tooltip>
@@ -114,6 +114,7 @@ import { captureGenerateScope, positiveId, sameGenerateScope, validTrackIds, typ
 import { captureVideoGenerationSettings, purposeLabel, videoGenerationIntentPayload, videoModeLabel, type VideoReference } from "../utils/videoMode";
 import {
   buildTrackCardPresentation,
+  canGenerateStoryboardPrompt,
   freezeClearVideosMutation,
   freezeDeleteCardMutation,
   freezeReloadStoryboardMutation,
@@ -291,9 +292,9 @@ async function changeIndex(index: number) {
 
 function promptStateLabel(track: TrackItem): string {
   if (track.state === "生成中") return "生成中";
-  if (track.state === "生成失败") return "生成失败";
+  if (track.state === "生成失败") return track.prompt?.trim() ? "本次失败 · 原文保留" : "生成失败";
   if (track.state === "已完成" || track.prompt?.trim()) return "已完成";
-  return "待生成";
+  return canGenerateStoryboardPrompt(track, props.storyboardList) ? "待生成" : "需手工填写";
 }
 
 function promptStateTheme(track: TrackItem): "default" | "primary" | "success" | "danger" {
@@ -558,7 +559,10 @@ async function batchGenText() {
   if (generateTextLoad.value || !props.scopeReady || !scope || disposed.value) return;
   const requestSequence = ++batchSequence;
   const trackData: any[] = [];
-  const selectedIds = validTrackIds(checkedTrackIds.value, trackList.value);
+  const requestedIds = validTrackIds(checkedTrackIds.value, trackList.value);
+  const skipped = trackList.value.filter(track => requestedIds.includes(track.id) && !canGenerateStoryboardPrompt(track, props.storyboardList));
+  const selectedIds = requestedIds.filter(id => !skipped.some(track => track.id === id));
+  if (skipped.length) window.$message.warning(`已跳过 ${skipped.length} 个没有独立源分镜的片段：${skipped.map(track => cardPresentation(track).title).join("、")}。可手动填写提示词。`);
   if (warnBlockedGeneration(blockedGenerationTracks(selectedIds))) return;
   const generationSnapshot = captureVideoGenerationSettings(props.modelParmas);
   const durationByTrack = new Map(trackList.value.filter((track) => selectedIds.includes(positiveId(track.id) ?? -1)).map((track) => {
@@ -648,7 +652,12 @@ async function batchGenText() {
         }
       });
     }
-    window.$message.success("开始生成提示词");
+    const failures = Array.isArray(data) ? data.filter((item:any) => item.state === "failed") : [];
+    if (failures.length) window.$message.error(failures.map((item:any) => {
+      const track = trackList.value.find(track => track.id === item.trackId);
+      return `${track ? cardPresentation(track).title : `片段 T${item.trackId}`}：${item.reason ?? "预校验失败"}`;
+    }).join("；"));
+    if (!Array.isArray(data) || data.length > failures.length) window.$message.success("已提交可执行片段的提示词生成任务");
     checkedTrackIds.value = [];
     checkAll.value = false;
   } catch (e: any) {

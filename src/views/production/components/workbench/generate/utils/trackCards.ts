@@ -147,3 +147,13 @@ export function singleFlight<T>(task: () => Promise<T>): () => Promise<T> {
   let running: Promise<T> | undefined;
   return () => running ??= task();
 }
+
+export function canGenerateStoryboardPrompt(track: TrackCardInput, storyboards: readonly StoryboardCardInput[]): boolean {
+  const card = buildTrackCardPresentation(track, storyboards);
+  return card.storyboardId != null && !card.mutationBlockedReason;
+}
+export function shouldNotifyPromptFailure(input: { state: string; previousState?: string | null; jobId?: string | null; previousJobId?: string | null; submitted?: boolean; ownedJobId?: string | null; requestMatches?: boolean }): boolean {
+  return input.state === "生成失败" && input.submitted === true && !!input.jobId
+    && (input.ownedJobId === input.jobId || input.requestMatches === true)
+    && (input.previousState !== "生成失败" || input.previousJobId !== input.jobId);
+}
