@@ -1,0 +1,4 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {preflightInputKey,acceptPreflightResponse} from '../src/utils/videoPreflightState.ts';
+test('approval/idempotency are not creative input; reordered refs and changed prompt are different',()=>{const a={prompt:'p',references:[{id:1},{id:2}],duration:4};assert.equal(preflightInputKey(a),preflightInputKey({...a,acknowledgement:'x',idempotencyKey:'y'}));assert.notEqual(preflightInputKey(a),preflightInputKey({...a,prompt:'new'}));assert.notEqual(preflightInputKey(a),preflightInputKey({...a,references:[{id:2},{id:1}]}));});
+test('late preflight results never overwrite another scope or newer inspection',()=>{assert.equal(acceptPreflightResponse('a','b',1,1),false);assert.equal(acceptPreflightResponse('a','a',1,2),false);assert.equal(acceptPreflightResponse('a','a',1,1,true),false);assert.equal(acceptPreflightResponse('a','a',1,1),true);});

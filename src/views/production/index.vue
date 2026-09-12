@@ -43,7 +43,7 @@
       <assets :id="props.id" v-model="flowData.assets" :highlight-id="focusedAssetId" :handleIds="props.data.handleIds" />
     </template>
     <template #node-storyboard="props">
-      <storyboard :id="props.id" v-model="flowData.storyboard" :assetsData="flowData.assets" :handleIds="props.data.handleIds" />
+      <storyboard ref="storyboardNodeRef" :id="props.id" v-model="flowData.storyboard" :assetsData="flowData.assets" :handleIds="props.data.handleIds" />
     </template>
     <template #node-workbench="props">
       <workbench :id="props.id" v-model="flowData.workbench" :handleIds="props.data.handleIds" />
@@ -101,6 +101,7 @@
 </template>
 
 <script setup lang="ts">
+import { provide } from "vue";
 import { useLocalStorage, useEventListener } from "@vueuse/core";
 import { VueFlow, useVueFlow } from "@vue-flow/core";
 import { Background } from "@vue-flow/background";
@@ -328,6 +329,15 @@ async function getScriptData() {
     await productionAgentStore().getHistory();
   }
 }
+
+const storyboardNodeRef=ref<any>();
+provide("navigateCanvasImage",async(target:any,repair:boolean)=>{
+ if(Number(project.value?.id)!==target.projectId||episodesId.value!==target.scriptId)return;
+ if(target.kind==='asset'){focusedAssetId.value=target.id;await nextTick();if(findNode('assets'))fitView({nodes:['assets'],duration:300,padding:0.15});return;}
+ await productionAgentStore().refreshCanvas();await nextTick();
+ if(findNode('storyboard'))await fitView({nodes:['storyboard'],duration:300,padding:0.15});
+ await storyboardNodeRef.value?.locateImageIssue(target.id,repair,!!target.regenerate);
+});
 
 async function openBuiltinArtifact(value: BuiltinArtifactTarget | BuiltinArtifactView) {
   const artifact = typeof value === "string" ? undefined : value;

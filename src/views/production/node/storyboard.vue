@@ -21,7 +21,7 @@
                 </t-button>
               </div>
 
-              <div class="frameCard">
+              <div class="frameCard" :data-storyboard-id="item.id" :style="focusedIssueId===item.id ? {outline:'4px solid var(--td-warning-color)'} : {}">
                 <div
                   class="frameImage"
                   :style="{
@@ -746,6 +746,15 @@ function openEditInfo(item: Storyboard) {
     window.$message.error(getProductionStateErrorMessage(error, "打开分镜编辑失败"));
   });
 }
+
+const focusedIssueId=ref<number>();
+async function locateImageIssue(id:number,repair:boolean,regenerate=false){
+ const item=storyboard.value.find(row=>row.id===id);if(!item)return;const originalProject=Number(project.value?.id),originalEpisode=episodesId.value;
+ focusedIssueId.value=id;await nextTick();document.querySelector(`[data-storyboard-id="${id}"]`)?.scrollIntoView({block:'center',inline:'center',behavior:'smooth'});
+ if(regenerate){const dialog=DialogPlugin.confirm({header:`重新生成 S${String(storyboard.value.indexOf(item)+1).padStart(2,'0')} 首帧`,body:'只按本镜头开始画面生成一张新图，不把后续切镜合入首帧。使用当前配置的图片模型并计入生成额度；原图文件保留，新图完成后自动保存。',confirmBtn:'生成新首帧',onConfirm:async()=>{dialog.destroy();if(originalProject!==Number(project.value?.id)||originalEpisode!==episodesId.value)return;try{if(await ensureStoryboardWritable(item)){await productionAgent.batchGenerateStoryboard([id],true);window.$message.success('首帧生成已提交，结果会自动更新');}}catch(error:any){window.$message.error(error?.message??'首帧生成未能提交，原图保留');}},onClose:()=>dialog.destroy()});}
+ else if(repair)await editStoryboaryImage(item,item.src?[item.src]:[]);
+}
+defineExpose({locateImageIssue});
 </script>
 
 <style lang="scss" scoped>

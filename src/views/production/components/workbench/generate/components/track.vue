@@ -153,6 +153,8 @@ const props = defineProps<{
     setIntent: (id: number, intent: PromptGenerationIntent) => void;
     finish: (id: number, retainIntent?: boolean) => void;
   };
+  inspectVideoBatch: (request:any)=>Promise<Map<number,string>|false>;
+  showPreflightError: (error:any)=>void;
   preparePromptGeneration: (ids: readonly number[], scope: { projectId: number; scriptId: number; sequence: number }) => Promise<boolean>;
   prepareReferenceSelection: (ids: readonly number[], scope: { projectId: number; scriptId: number; sequence: number }) => Promise<boolean>;
   prepareTrackDraft: (track: TrackItem, scope: { projectId: number; scriptId: number; sequence: number }, action: string) => Promise<boolean>;
@@ -754,6 +756,9 @@ function batchGenVideo() {
         audio: generationSnapshot.audio,
         trackData,
       };
+      const approvals=await props.inspectVideoBatch(requestData);
+      if(!approvals || !sameGenerateScope(scope,project.value?.id,episodesId.value,props.scopeSequence,disposed.value)){generateVideoLoad.value=false;return;}
+      requestData.trackData.forEach((item:any)=>{const approval=approvals.get(item.trackId);if(approval)item.acknowledgement=approval;});
       const batchScope = `batch-request:${scope.projectId}:${scope.scriptId}:${checkedTrackData
         .map((track) => track.id)
         .sort((a, b) => a - b)
@@ -814,7 +819,7 @@ function batchGenVideo() {
             if (payload) generationIntents.clear(scope, payload.idempotencyKey);
           });
         }
-        window.$message.error((e as any)?.message ?? $t("workbench.generate.generateError"));
+        props.showPreflightError(e);
       } finally {
         generateVideoLoad.value = false;
       }

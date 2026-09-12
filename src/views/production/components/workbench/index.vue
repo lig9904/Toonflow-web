@@ -57,7 +57,7 @@
 </template>
 
 <script setup lang="ts">
-import type { Ref } from "vue";
+import { inject, provide, type Ref } from "vue";
 import axios from "@/utils/axios";
 import { createIdempotencyKey } from "@/utils/idempotency";
 import preview from "./preview.vue";
@@ -88,6 +88,14 @@ watch(visible, (next, previous) => {
   if (!hasCreativeDrafts({ scope: workbenchDraftScope() })) return;
   visible.value = true;
   void requestClose();
+});
+
+const navigateCanvasImage=inject<(target:any,repair:boolean)=>Promise<void>>("navigateCanvasImage");
+provide("locateVideoImage",async(target:any,repair:boolean)=>{
+ if(target.projectId!==Number(project.value?.id)||target.scriptId!==episodesId.value)return;
+ if(!await confirmWorkbenchDrafts("定位并处理问题图片"))return;
+ approvedClose=true;visible.value=false;
+ await nextTick();await navigateCanvasImage?.(target,repair);
 });
 
 // 画布尺寸配置

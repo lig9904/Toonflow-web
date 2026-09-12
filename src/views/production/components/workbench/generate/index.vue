@@ -6,7 +6,7 @@
     </div>
     <div class="referenceImage">
       <div class="uploadBtn">
-        <imageSelect :mode="currentModeIntent" v-model="imageList" :storyboard-list="storyboardList" />
+        <imageSelect :mode="currentModeIntent" :issues="currentReferenceIssues" @issue="showReferenceIssue" v-model="imageList" :storyboard-list="storyboardList" />
         <t-button v-if="modelParmas.model.startsWith('volcengineSd2:')" size="small" variant="outline" :disabled="!scopeReady || !trustedLocalTargets.length" @click="trustedAssetsVisible = true">火山素材库</t-button>
       </div>
     </div>
@@ -31,6 +31,7 @@
         @modeChange="modeChange"
         @durationUpdated="handleDurationUpdated" />
     </div>
+    <VideoPreflightPanel ref="preflightPanelRef" :project-id="Number(project?.id)" :script-id="episodesId" @changed="getGenerateData" :reports="preflightReports" :busy="preflightBusy" :stale="preflightStale" @check="checkCurrentPreflight" @locate="locatePreflightImage" @acknowledge="acknowledgePreflight" />
     <div class="generate ac">
       <div class="prompt" v-if="currentTrack">
         <t-card :title="currentTrackTitle + ' · ' + $t('workbench.generate.generateText')" header-bordered class="videoPrompt">
@@ -48,7 +49,7 @@
             </div>
             <t-alert v-if="currentTrack.referencesNeedReview" theme="warning" title="参考素材已变化，已保留人工提示词，请在生成前核对素材编号与正文。" />
             <details v-if="currentTrack.promptReview && currentTrack.prompt === currentTrack.promptReviewPrompt && currentTrack.promptReviewContext === reviewContextSignature(currentTrack)" class="promptReview">
-              <summary>{{ currentTrack.promptReview.status === 'passed' ? '提示词核验完成' : currentTrack.promptReview.status === 'failed' ? '提示词核验未完成' : '提示词核验提示' }}{{ currentTrack.promptReview.revised ? ' · 已作最小修正' : '' }}</summary>
+              <summary>{{ currentTrack.promptReview.status === 'passed' ? '文字核验通过' : currentTrack.promptReview.status === 'failed' ? '文字核验未完成' : '文字核验提示' }}{{ currentTrack.promptReview.revised ? ' · 已作最小修正' : '' }}</summary>
               <p>{{ currentTrack.promptReview.summary }}</p>
               <ul><li v-for="(finding,index) in currentTrack.promptReview.findings" :key="index">{{ finding.message }}</li></ul>
             </details>
@@ -85,6 +86,8 @@
         :scope-sequence="scopeSequence"
         :prompt-generation-gate="promptGenerationGate"
         :prepare-prompt-generation="preparePromptGeneration"
+        :inspect-video-batch="inspectVideoBatch"
+        :show-preflight-error="showPreflightError"
         :prepare-reference-selection="prepareReferenceSelection"
         :prepare-track-draft="resolveTrackDraft"
         :before-track-change="beforeTrackChange"
@@ -98,6 +101,9 @@
 
 <script setup lang="ts">
 import type { Ref } from "vue";
+import VideoPreflightPanel from "@/components/reviews/videoPreflightPanel.vue";
+import { preflightInputKey, acceptPreflightResponse } from "@/utils/videoPreflightState";
+import { inject } from "vue";
 import newTrack from "./components/track.vue";
 import imageSelect from "./components/imageSelect.vue";
 import VolcengineTrustedAssets from "@/components/volcengineTrustedAssets.vue";
@@ -1097,11 +1103,15 @@ async function generateVideo() {
         audio: generationSnapshot.audio,
         trackId: track.id,
       };
+      const checked=await inspectVideoBatch({projectId:scopeSnapshot.projectId,scriptId:scopeSnapshot.scriptId,model:requestData.model,resolution:requestData.resolution,audio:requestData.audio,trackData:[requestData]});
+      if(!checked || !sameGenerateScope(scopeSnapshot,project.value?.id,episodesId.value,scopeSequence.value,disposed.value))return;
+      const acknowledgement=checked.get(track.id);
+      const submissionData={...requestData,...(acknowledgement?{acknowledgement}:{})};
       const scope = `single:${String(project.value?.id ?? "")}:${String(episodesId.value ?? "")}:${String(track.id)}`;
       generateVideoPending.value = true;
       try {
-        const { videoId, promptReview, modeResolution } = await generationIntents.run(scope, requestData, async (idempotencyKey) => {
-          const { data } = await axios.post("/production/workbench/generateVideo", { ...requestData, idempotencyKey });
+        const { videoId, promptReview, modeResolution } = await generationIntents.run(scope, submissionData, async (idempotencyKey) => {
+          const { data } = await axios.post("/production/workbench/generateVideo", { ...submissionData, idempotencyKey });
           return { videoId: data.videoId, promptReview: data.promptReview, modeResolution: data.modeResolution };
         });
         applyModeResolution(track, modeResolution);
@@ -1119,8 +1129,8 @@ async function generateVideo() {
           state: "生成中",
           src: "",
         });
-      } catch (e) {
-        window.$message.error((e as any)?.message ?? "视频发起生成请求失败");
+      } catch (e:any) {
+        if(sameGenerateScope(scopeSnapshot,project.value?.id,episodesId.value,scopeSequence.value,disposed.value))showPreflightError({...e,message:e?.message,trackId:track.id,shotLabel:buildTrackCardPresentation(track,storyboardList.value).title});
       } finally {
         generateVideoPending.value = false;
       }
@@ -1293,6 +1303,60 @@ onUnmounted(() => {
   stopPoll();
   stopPromptPoll();
 });
+
+const preflightPanelRef=ref<any>();
+const currentReferenceIssues=computed(()=>preflightReports.value.filter(r=>r.preflight.trackId===currentTrack.value?.id).flatMap(r=>r.preflight.issues.filter((i:any)=>i.severity!=='info')));
+function showReferenceIssue(item:any){preflightPanelRef.value?.showReference(item);}
+const preflightReports=ref<any[]>([]),preflightBusy=ref(false),preflightStale=ref(false);
+const preflightApprovals=new Map<number,{fingerprint:string;key:string}>();
+let preflightSequence=0,lastPreflightRequest:any=null;
+let preflightTimer:ReturnType<typeof setTimeout>|undefined;
+const preflightScopeKey=()=>JSON.stringify({projectId:project.value?.id,scriptId:episodesId.value,sequence:scopeSequence.value});
+const locateVideoImage=inject<(target:any,repair:boolean)=>Promise<void>>("locateVideoImage");
+const inputStateKey=computed(()=>JSON.stringify({scope:preflightScopeKey(),activeTrackId:currentTrack.value?.id,model:modelParmas.value,tracks:trackList.value.map(t=>({id:t.id,prompt:t.prompt,version:t.version,revision:t.modeIntentRevision,medias:t.medias}))}));
+watch(inputStateKey,()=>{if(preflightReports.value.length)preflightStale.value=true;preflightReports.value=[];preflightApprovals.clear();++preflightSequence;preflightBusy.value=false;
+ if(preflightTimer)clearTimeout(preflightTimer);
+ preflightTimer=setTimeout(()=>{const track=currentTrack.value,scope=currentScope.value;if(!track||!scope||!scopeReady.value||isPromptDirty(track)||modeSaving.value||modeResolving.value||disposed.value)return;const settings=captureVideoGenerationSettings(modelParmas.value);void inspectVideoBatch({projectId:scope.projectId,scriptId:scope.scriptId,model:settings.model,resolution:settings.resolution,audio:settings.audio,trackData:[{trackId:track.id,prompt:track.prompt,duration:settings.duration,references:referencesForTrack(track),modeIntentRevision:track.modeIntentRevision??0}]});},800);
+});
+onBeforeUnmount(()=>{if(preflightTimer)clearTimeout(preflightTimer);++preflightSequence;});
+async function inspectVideoBatch(request:any):Promise<Map<number,string>|false>{
+ await nextTick();
+ const normalized={projectId:request.projectId,scriptId:request.scriptId,model:request.model,resolution:request.resolution,audio:request.audio,trackData:request.trackData.map((t:any)=>({trackId:t.trackId,prompt:t.prompt,duration:t.duration,references:t.references,modeIntentRevision:t.modeIntentRevision??0}))};
+ const key=preflightInputKey(normalized),scope=preflightScopeKey(),state=inputStateKey.value,sequence=++preflightSequence;
+ normalized.trackData=normalized.trackData.map((t:any)=>{const approval=preflightApprovals.get(t.trackId);return {...t,...(approval?.key===key?{acknowledgement:approval.fingerprint}:{})};});
+ preflightBusy.value=true;
+ try{const {data}=await axios.post('/production/workbench/inspectVideoGeneration',normalized);
+  if(scope!==preflightScopeKey()||!acceptPreflightResponse(state,inputStateKey.value,sequence,preflightSequence,disposed.value))return false;
+  preflightReports.value=data.reports.map((r:any)=>({...r,submissionOutcome:'not_submitted'}));preflightStale.value=false;lastPreflightRequest=normalized;
+  const blocked=data.reports.some((r:any)=>!r.preflight?.canSubmit);
+  if(blocked){await nextTick();document.querySelector('.preflightPanel')?.scrollIntoView({block:'nearest',behavior:'smooth'});return false;}
+  return new Map(data.reports.filter((r:any)=>r.preflight.acknowledged).map((r:any)=>[r.preflight.trackId,r.preflight.fingerprint]));
+ }catch(error){if(scope===preflightScopeKey()&&sequence===preflightSequence)showPreflightError({...error as any,message:(error as any)?.message??"检查暂不可用，请重新检查",submissionOutcome:"not_submitted"});return false;}
+ finally{if(sequence===preflightSequence)preflightBusy.value=false;}
+}
+function showPreflightError(error:any){
+ if(error?.report?.preflight){preflightReports.value=[{...error.report,submissionOutcome:error.submissionOutcome??'not_submitted'}];preflightStale.value=false;}
+ else if(error?.reports?.length){preflightReports.value=error.reports.map((r:any)=>({...r,submissionOutcome:error.submissionOutcome??'not_submitted'}));preflightStale.value=false;}
+ else{preflightReports.value=[{submissionOutcome:error?.submissionOutcome??'unknown',preflight:{trackId:error?.trackId??currentTrack.value?.id??0,shotLabel:error?.shotLabel??currentTrackTitle.value,canSubmit:false,acknowledged:false,issues:[{code:error?.code??'REQUEST_FAILED',severity:'error',message:error?.message??'未能确认提交结果，请刷新任务状态后处理',overridable:false}]}}];}
+ void nextTick(()=>document.querySelector('.preflightPanel')?.scrollIntoView({block:'nearest',behavior:'smooth'}));
+}
+async function checkCurrentPreflight(){
+ const track=currentTrack.value,scope=currentScope.value;if(!track||!scope||!scopeReady.value)return;
+ if(!await resolveTrackDraft(track,scope,'检查生成输入'))return;
+ if(!await saveTrackReferences(track,scope))return;
+ const settings=captureVideoGenerationSettings(modelParmas.value);
+ await inspectVideoBatch({projectId:scope.projectId,scriptId:scope.scriptId,model:settings.model,resolution:settings.resolution,audio:settings.audio,trackData:[{trackId:track.id,prompt:track.prompt,duration:settings.duration,references:referencesForTrack(track),modeIntentRevision:track.modeIntentRevision??0}]});
+}
+async function acknowledgePreflight(report:any){
+ if(!lastPreflightRequest||!preflightReports.value.includes(report)||preflightStale.value)return;
+ const errors=report.preflight.issues.filter((i:any)=>i.severity==='error');if(!errors.length||errors.some((i:any)=>!i.overridable))return;
+ preflightApprovals.set(report.preflight.trackId,{fingerprint:report.preflight.fingerprint,key:preflightInputKey(lastPreflightRequest)});
+ await inspectVideoBatch(lastPreflightRequest);
+}
+async function locatePreflightImage(target:any,repair:boolean){
+ const scope=currentScope.value;if(!scope||!locateVideoImage)return;
+ await locateVideoImage({...target,projectId:scope.projectId,scriptId:scope.scriptId},repair);
+}
 </script>
 
 <style lang="scss" scoped>

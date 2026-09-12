@@ -3,6 +3,7 @@
     <!-- 自动/多参考/文本模式都保留完整素材列表，最终采用项由后端解析快照决定。 -->
     <template v-if="mode">
       <div class="uploadBtn referenceWithPurpose c fc" v-for="(item, index) in displayItems" :key="`${item.sources}:${item.id}:${index}`">
+        <button v-if="props.issues?.some(issue=>issue.target?.id===item.id && (issue.target.kind==='storyboard'?'storyboard':'assets')===item.sources)" class="referenceIssue" type="button" @click.stop="emit('issue',item)">需核对</button>
         <template v-if="item.src">
           <t-image v-if="item.fileType == 'image'" :src="item.src" fit="contain" class="uploadPreview">
             <template #overlayContent>
@@ -88,7 +89,9 @@ import assetsCheck, { type ClipMediaType } from "@/utils/assetsCheck";
 import axios from "@/utils/axios";
 import { defaultReferencePurpose, parseModeIntentValue, purposeLabel, type VideoModeIntent, type VideoReferencePurpose } from "../utils/videoMode";
 
+const emit=defineEmits<{issue:[target:any]}>();
 const props = defineProps<{
+  issues?: any[];
   mode: VideoModeIntent;
   storyboardList: StoryboardItem[];
 }>();
@@ -458,4 +461,6 @@ function splitImageItem(target: UploadItem) {
     }
   }
 }
+
+.referenceWithPurpose{position:relative}.referenceIssue{position:absolute;bottom:34px;left:4px;z-index:5;background:var(--td-warning-color);color:white;border:0;border-radius:4px;cursor:pointer;font-size:12px;padding:2px 4px}
 </style>
