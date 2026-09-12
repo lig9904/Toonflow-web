@@ -1200,6 +1200,7 @@ async function getTrackPromptList() {
   const scope = currentScope.value;
   if (promptPollInFlight || !scope || !scopeReady.value || disposed.value || !hasGeneratePromptIds.value.length) return;
   const requestedIds = new Set(hasGeneratePromptIds.value);
+  const videoIdsAtRequest=new Map(trackList.value.map(t=>[t.id,new Set(t.videoList.map(v=>v.id))]));
   const jobIds = trackList.value.filter((track) => track.state === "生成中" && track.promptJobId).map((track) => track.promptJobId!);
   promptPollInFlight = true;
   try {
@@ -1213,7 +1214,7 @@ async function getTrackPromptList() {
     if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     if (Array.isArray(data)) {
       const returnedIds = new Set<number>();
-      data.forEach((item: { id: number; jobId?: string; idempotencyKey?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number; promptReferenceRevision?: number; promptReview?: VideoPromptReview | null }) => {
+      data.forEach((item: { id: number; videoList?: TrackItem["videoList"]; selectVideoId?: number|null; jobId?: string; idempotencyKey?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number; promptReferenceRevision?: number; promptReview?: VideoPromptReview | null }) => {
         const findData = trackList.value.find((t) => t.id == item.id);
         returnedIds.add(Number(item.id));
         if (findData) {
@@ -1223,6 +1224,8 @@ async function getTrackPromptList() {
           const localVersion = Number(findData.version ?? 0);
           // A save may have completed while this read was in flight.
           if (Number.isSafeInteger(remoteVersion) && remoteVersion < localVersion) return;
+          if(Array.isArray(item.videoList)){const incoming=new Set(item.videoList.map(v=>v.id));const justCreated=findData.videoList.filter(v=>!videoIdsAtRequest.get(findData.id)?.has(v.id)&&!incoming.has(v.id));findData.videoList=[...item.videoList,...justCreated];}
+          if("selectVideoId" in item)findData.selectVideoId=positiveId(item.selectVideoId)??undefined;
           const previousState = findData.state;
           const previousJobId = findData.promptJobId;
           const localDraft = findData.prompt !== (persistedTrackPrompts.get(findId) ?? "");
