@@ -43,6 +43,18 @@
             </t-button>
           </template>
           <div class="promptData fc">
+            <div v-if="currentTrack.promptFailure" class="promptFailure" role="status">
+              <strong>{{ currentTrackTitle }} · {{ promptFailureStage(currentTrack.promptFailure.stage) }}</strong>
+              <p>{{ currentTrack.promptFailure.reason }}</p>
+              <p v-if="!currentTrack.promptFailure.drafts.length">此任务没有可恢复的生成稿。源分镜仍保留，可检查后重新生成。</p>
+              <details v-for="(candidate,index) in currentTrack.promptFailure.drafts" :key="index">
+                <summary>{{ candidate.label }}（{{ candidate.text.length }}字，尚未采用）</summary>
+                <pre>{{ candidate.text }}</pre>
+                <t-button size="small" variant="outline" @click="loadFailedPromptDraft(candidate.text)">载入编辑器修改</t-button>
+              </details>
+              <details><summary>查看源分镜与错误位置</summary><div v-for="source in currentTrack.promptFailure.sources" :key="source.id"><b>源分镜 ID {{ source.id }}</b><p>画面提示词</p><pre>{{ source.prompt }}</pre><p>视频描述（对白、动作和剪辑说明）</p><pre>{{ source.videoDesc }}</pre></div></details>
+              <small>载入只恢复本地草稿，点击“保存提示词”后才会保存；不会自动生成视频。</small>
+            </div>
             <t-alert v-if="!canGenerateStoryboardPrompt(currentTrack, storyboardList)" theme="info" title="此片段未绑定独立源分镜，不能从分镜生成提示词。可手动填写提示词并保存后生成视频。" />
             <div class="promptInput">
               <promptEditor v-model="currentPromptDraft" :references="references" :placeholder="$t('workbench.generate.promptPlaceholder')" />
@@ -559,6 +571,15 @@ const currentPromptDraft = computed({
     track.prompt = text;
   },
 });
+
+function promptFailureStage(stage:string):string { return ({preparation:"准备失败",generation:"模型生成未完成",review:"审核未完成",validation:"提示词检查未通过",save:"保存冲突，生成稿已保留",interrupted:"任务中断",legacy:"上次提示词生成失败"} as Record<string,string>)[stage]??"提示词任务未完成"; }
+async function loadFailedPromptDraft(text:string) {
+ const track=currentTrack.value,scope=currentScope.value;
+ if(!track||!scope||!await resolveTrackDraft(track,scope,"载入失败草稿"))return;
+ if(currentTrack.value?.id!==track.id || !sameGenerateScope(scope,project.value?.id,episodesId.value,scopeSequence.value,disposed.value))return;
+ currentPromptDraft.value=text;
+ window.$message.success("已载入草稿，可修改后点击保存提示词");
+}
 
 async function resolveTrackDraft(track: TrackItem, scope: GenerateScope, action: string): Promise<boolean> {
   if (!isPromptDirty(track)) return true;
@@ -1214,7 +1235,7 @@ async function getTrackPromptList() {
     if (!sameGenerateScope(scope, project.value?.id, episodesId.value, scopeSequence.value, disposed.value)) return;
     if (Array.isArray(data)) {
       const returnedIds = new Set<number>();
-      data.forEach((item: { id: number; videoList?: TrackItem["videoList"]; selectVideoId?: number|null; jobId?: string; idempotencyKey?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; version?: number; promptReferenceRevision?: number; promptReview?: VideoPromptReview | null }) => {
+      data.forEach((item: { id: number; videoList?: TrackItem["videoList"]; selectVideoId?: number|null; jobId?: string; idempotencyKey?: string; state: "生成中" | "未生成" | "已完成" | "生成失败"; prompt?: string; reason?: string; promptFailure?: TrackItem["promptFailure"]; version?: number; promptReferenceRevision?: number; promptReview?: VideoPromptReview | null }) => {
         const findData = trackList.value.find((t) => t.id == item.id);
         returnedIds.add(Number(item.id));
         if (findData) {
@@ -1226,6 +1247,7 @@ async function getTrackPromptList() {
           if (Number.isSafeInteger(remoteVersion) && remoteVersion < localVersion) return;
           if(Array.isArray(item.videoList)){const incoming=new Set(item.videoList.map(v=>v.id));const justCreated=findData.videoList.filter(v=>!videoIdsAtRequest.get(findData.id)?.has(v.id)&&!incoming.has(v.id));findData.videoList=[...item.videoList,...justCreated];}
           if("selectVideoId" in item)findData.selectVideoId=positiveId(item.selectVideoId)??undefined;
+          findData.promptFailure = item.promptFailure ?? null;
           const previousState = findData.state;
           const previousJobId = findData.promptJobId;
           const localDraft = findData.prompt !== (persistedTrackPrompts.get(findId) ?? "");
@@ -1420,3 +1442,5 @@ async function locatePreflightImage(target:any,repair:boolean){
 </style>
 
 <style scoped>.promptReview{padding:8px 12px;font-size:13px;color:#56616e;max-height:180px;overflow:auto}.promptReview summary{cursor:pointer;color:#0052d9}.promptReview li{margin:6px 0}</style>
+
+<style scoped>.promptFailure{margin:8px 12px;padding:12px;border:1px solid #f0bc7b;border-radius:6px;background:var(--td-warning-color-1);font-size:13px}.promptFailure p{margin:6px 0}.promptFailure details{margin:8px 0}.promptFailure summary{cursor:pointer}.promptFailure pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;font:inherit}.promptFailure small{display:block;margin-top:8px}</style>

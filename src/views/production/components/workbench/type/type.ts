@@ -67,6 +67,7 @@ interface VideoModeResolutionView {
 }
 
 interface TrackItem {
+  promptFailure?: {jobId:string;stage:string;reason:string;drafts:Array<{label:string;text:string}>;sources:Array<{id:number;prompt:string;videoDesc:string}>}|null;
   promptReview?: VideoPromptReview | null;
   promptReviewPrompt?: string;
   promptReviewContext?: string;
