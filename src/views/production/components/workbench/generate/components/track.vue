@@ -175,6 +175,12 @@ const emit = defineEmits<{
   saveImageList: [trackId: number];
   refreshList: [];
 }>();
+function selectTracks(ids:readonly number[]){
+ if(generateVideoLoad.value||!props.scopeReady||disposed.value)return;
+ checkedTrackIds.value=validTrackIds(ids,trackList.value);
+ checkAll.value=trackList.value.length>0&&checkedTrackIds.value.length===trackList.value.length;
+}
+defineExpose({selectTracks});
 const checkAll = ref(false); // 全选状态
 const workspaceMutationIntents = new Map<string, { signature: string; key: string }>();
 const createTrackIntent = ref<{ signature: string; key: string }>();
@@ -689,6 +695,7 @@ function batchGenVideo() {
       const scope = captureGenerateScope(project.value?.id, episodesId.value, props.scopeSequence);
       if (!scope || !props.scopeReady || disposed.value) return;
 
+      try {
       const selectedIds = validTrackIds(checkedTrackIds.value, trackList.value);
       if (warnBlockedGeneration(blockedGenerationTracks(selectedIds))) return;
       checkedTrackIds.value = selectedIds;
@@ -807,6 +814,9 @@ function batchGenVideo() {
       } finally {
         generateVideoLoad.value = false;
       }
+      } catch (error) {
+        if(sameGenerateScope(scope,project.value?.id,episodesId.value,props.scopeSequence,disposed.value))props.showPreflightError(error);
+      } finally { generateVideoLoad.value=false; }
     },
     onCancel: () => dlg.destroy(),
   });

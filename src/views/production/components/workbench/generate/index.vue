@@ -31,7 +31,7 @@
         @modeChange="modeChange"
         @durationUpdated="handleDurationUpdated" />
     </div>
-    <VideoPreflightPanel ref="preflightPanelRef" :project-id="Number(project?.id)" :script-id="episodesId" @changed="getGenerateData" :reports="preflightReports" :busy="preflightBusy" :stale="preflightStale" @check="checkCurrentPreflight" @locate="locatePreflightImage" @acknowledge="acknowledgePreflight" />
+    <VideoPreflightPanel ref="preflightPanelRef" :project-id="Number(project?.id)" :script-id="episodesId" @changed="getGenerateData" :reports="preflightReports" :busy="preflightBusy" :stale="preflightStale" @check="checkCurrentPreflight" @locate="locatePreflightImage" @acknowledge="acknowledgePreflight" @select-passed="selectPassedTracks" />
     <div class="generate ac">
       <div class="prompt" v-if="currentTrack">
         <t-card :title="currentTrackTitle + ' · ' + $t('workbench.generate.generateText')" header-bordered class="videoPrompt">
@@ -82,7 +82,7 @@
     </div>
     <VolcengineTrustedAssets v-model="trustedAssetsVisible" :project-id="project?.id" :script-id="episodesId" :targets="trustedLocalTargets" />
     <div class="track">
-      <newTrack
+      <newTrack ref="trackPanelRef"
         v-model:activeTrackIndex="activeTrackIndex"
         v-model="trackList"
         :image-list="imageList"
@@ -117,7 +117,7 @@ import type { Ref } from "vue";
 import VideoPreflightPanel from "@/components/reviews/videoPreflightPanel.vue";
 import {isResolvedReviewInput} from "@/utils/videoReviewInput";
 import { createSavedVideoPromptStore, draftAfterPromptSave } from "@/utils/videoPromptSaveState";
-import { preflightInputKey, acceptPreflightResponse } from "@/utils/videoPreflightState";
+import { preflightInputKey, acceptPreflightResponse, summarizeVideoPreflight } from "@/utils/videoPreflightState";
 import { inject } from "vue";
 import newTrack from "./components/track.vue";
 import imageSelect from "./components/imageSelect.vue";
@@ -1329,6 +1329,13 @@ onUnmounted(() => {
 });
 
 const preflightPanelRef=ref<any>();
+const trackPanelRef=ref<InstanceType<typeof newTrack>>();
+function selectPassedTracks(ids:number[]){
+ if(preflightBusy.value||preflightStale.value||!scopeReady.value)return;
+ const eligible=summarizeVideoPreflight(preflightReports.value).passedIds;
+ trackPanelRef.value?.selectTracks(ids.filter(id=>eligible.includes(id)));
+ window.$message.info(`已勾选 ${ids.filter(id=>eligible.includes(id)).length} 个片段，请点击“批量生成视频”开始生成。`);
+}
 const currentReferenceIssues=computed(()=>preflightReports.value.filter(r=>r.preflight.trackId===currentTrack.value?.id).flatMap(r=>r.preflight.issues.filter((i:any)=>i.severity!=='info')));
 function showReferenceIssue(item:any){preflightPanelRef.value?.showReference(item);}
 const preflightReports=ref<any[]>([]),preflightBusy=ref(false),preflightStale=ref(false);
@@ -1340,10 +1347,10 @@ const locateVideoImage=inject<(target:any,repair:boolean)=>Promise<void>>("locat
 const inputStateKey=computed(()=>JSON.stringify({scope:preflightScopeKey(),activeTrackId:currentTrack.value?.id,model:modelParmas.value,tracks:trackList.value.map(t=>({id:t.id,prompt:t.prompt,version:t.version,revision:t.modeIntentRevision,medias:t.medias}))}));
 watch(inputStateKey,()=>{if(preflightReports.value.length)preflightStale.value=true;preflightReports.value=[];preflightApprovals.clear();++preflightSequence;preflightBusy.value=false;
  if(preflightTimer)clearTimeout(preflightTimer);
- preflightTimer=setTimeout(()=>{const track=currentTrack.value,scope=currentScope.value;if(!track||!scope||!scopeReady.value||isPromptDirty(track)||modeSaving.value||modeResolving.value||disposed.value)return;const settings=captureVideoGenerationSettings(modelParmas.value);void inspectVideoBatch({projectId:scope.projectId,scriptId:scope.scriptId,model:settings.model,resolution:settings.resolution,audio:settings.audio,trackData:[{trackId:track.id,prompt:track.prompt,duration:settings.duration,references:referencesForTrack(track),modeIntentRevision:track.modeIntentRevision??0}]});},800);
+ preflightTimer=setTimeout(()=>{const track=currentTrack.value,scope=currentScope.value;if(!track||!scope||!scopeReady.value||isPromptDirty(track)||modeSaving.value||modeResolving.value||disposed.value)return;const settings=captureVideoGenerationSettings(modelParmas.value);void inspectVideoBatch({projectId:scope.projectId,scriptId:scope.scriptId,model:settings.model,resolution:settings.resolution,audio:settings.audio,trackData:[{trackId:track.id,prompt:track.prompt,duration:settings.duration,references:referencesForTrack(track),modeIntentRevision:track.modeIntentRevision??0}]},false);},800);
 });
 onBeforeUnmount(()=>{if(preflightTimer)clearTimeout(preflightTimer);++preflightSequence;});
-async function inspectVideoBatch(request:any):Promise<Map<number,string>|false>{
+async function inspectVideoBatch(request:any,interactive=true):Promise<Map<number,string>|false>{
  await nextTick();
  // An explicit batch check supersedes any scheduled single-track refresh.
  if(preflightTimer){clearTimeout(preflightTimer);preflightTimer=undefined;}
@@ -1352,10 +1359,10 @@ async function inspectVideoBatch(request:any):Promise<Map<number,string>|false>{
  normalized.trackData=normalized.trackData.map((t:any)=>{const approval=preflightApprovals.get(t.trackId);return {...t,...(approval?.key===key?{acknowledgement:approval.fingerprint}:{})};});
  preflightBusy.value=true;
  try{const {data}=await axios.post('/production/workbench/inspectVideoGeneration',normalized);
-  if(scope!==preflightScopeKey()||!acceptPreflightResponse(state,inputStateKey.value,sequence,preflightSequence,disposed.value))return false;
+  if(scope!==preflightScopeKey()||!acceptPreflightResponse(state,inputStateKey.value,sequence,preflightSequence,disposed.value)){if(interactive&&!disposed.value)window.$message.warning('检查期间片段或参数发生变化，视频尚未提交，请重新点击生成。');return false;}
   preflightReports.value=data.reports.map((r:any)=>({...r,submissionOutcome:'not_submitted'}));preflightStale.value=false;lastPreflightRequest=normalized;
   const blocked=data.reports.some((r:any)=>!r.preflight?.canSubmit);
-  if(blocked){await nextTick();document.querySelector('.preflightPanel')?.scrollIntoView({block:'nearest',behavior:'smooth'});return false;}
+  if(blocked){if(interactive)window.$message.warning(summarizeVideoPreflight(data.reports).message);await nextTick();document.querySelector('.preflightPanel')?.scrollIntoView({block:'nearest',behavior:'smooth'});return false;}
   return new Map(data.reports.filter((r:any)=>r.preflight.acknowledged).map((r:any)=>[r.preflight.trackId,r.preflight.fingerprint]));
  }catch(error){if(scope===preflightScopeKey()&&sequence===preflightSequence)showPreflightError({...error as any,message:(error as any)?.message??"检查暂不可用，请重新检查",submissionOutcome:"not_submitted"});return false;}
  finally{if(sequence===preflightSequence)preflightBusy.value=false;}

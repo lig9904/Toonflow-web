@@ -1,10 +1,16 @@
 <template>
   <section class="preflightPanel" aria-label="本地生成检查">
     <div class="header"><strong>本地生成检查</strong><span class="checkSummary">{{ reports.length ? `${reports.length} 个片段 · ${reports.filter(r => !r.preflight.canSubmit).length} 个本地阻断项` : '尚未检查' }}</span><t-button size="small" variant="text" :aria-expanded="expanded" @click="expanded=!expanded">{{ expanded ? '收起检查详情' : '展开检查详情' }}</t-button><t-button size="small" variant="outline" :loading="busy" :disabled="busy" @click="$emit('check')">重新检查当前输入</t-button></div>
+    <div v-if="summary.blocked.length && reports.every(r=>r.submissionOutcome==='not_submitted')" class="batchBlocked" role="alert">
+      <strong>{{ summary.message }}</strong>
+      <p>请先处理下方置顶的问题。{{ summary.passed.length ? `其余 ${summary.passed.length} 个片段通过了本地检查。` : '' }}</p>
+      <t-button v-if="summary.passed.length && reports.length>1" size="small" :disabled="busy || stale" @click="$emit('selectPassed',summary.passedIds)">只勾选通过检查的 {{ summary.passed.length }} 个片段</t-button>
+      <p v-if="summary.passed.length && reports.length>1">勾选后需再次点击“批量生成视频”；此按钮不会开始生成。</p>
+    </div>
     <p class="platformReviewNote">本地检查用于核对参数和素材；内容是否通过审核，以模型平台提交后的结果为准。</p>
     <div v-show="expanded" class="checkDetails">
     <p v-if="!reports.length">{{ stale ? '图片、提示词或参数已变化，需要重新检查。之前的确认已失效。' : '检查会读取当前图片与提示词，不提交视频，不调用生成模型。' }}</p>
-    <article v-for="report in reports" :key="report.preflight.trackId">
+    <article v-for="report in summary.ordered" :key="report.preflight.trackId">
       <div class="verdict"><b>{{report.preflight.shotLabel}}</b><span :class="report.preflight.canSubmit?'ok':'error'">{{report.preflight.canSubmit ? report.preflight.acknowledged ? '已确认构图差异 · 提交时仍会复查' : '本地检查无阻断项' : report.submissionOutcome==='unknown' ? '提交结果待确认' : '需要处理 · 视频尚未提交'}}</span></div>
       <p v-if="report.preflight.issues.some((i:any)=>/UNREVIEWED|STALE|PENDING|FAILED/.test(i.code))">部分图片尚未完成当前版本的视觉核验，具体状态见下方检查说明。</p>
       <p v-if="!report.preflight.issues.length" class="ok">当前图片与提示词检查没有发现阻断项。</p>
@@ -29,14 +35,16 @@
   </section>
 </template>
 <script setup lang="ts">
-import {ref,watch} from 'vue';
+import {ref,watch,computed} from 'vue';
+import {summarizeVideoPreflight} from '@/utils/videoPreflightState';
 import CropStoryboardFrame from './cropStoryboardFrame.vue';
 import {DialogPlugin} from 'tdesign-vue-next';
 import settingStore from '@/stores/setting';
 const props=defineProps<{reports:any[];busy:boolean;stale:boolean;projectId?:number;scriptId?:number}>();
-const emit=defineEmits<{check:[];changed:[];locate:[target:any,repair:boolean];acknowledge:[report:any]}>();
+const emit=defineEmits<{check:[];changed:[];locate:[target:any,repair:boolean];acknowledge:[report:any];selectPassed:[ids:number[]]}>();
 const preview=ref<any>(null),cropTarget=ref<any>(null);
 const expanded=ref(false);
+const summary=computed(()=>summarizeVideoPreflight(props.reports));
 watch(()=>props.reports,reports=>{if(reports.some(r=>!r.preflight.canSubmit))expanded.value=true;});
 function mediaUrl(path?:string){if(!path)return '';if(/^https?:\/\//.test(path))return path;return new URL(path.startsWith('/oss/')?path:`/oss/${path.replace(/^\//,'')}`,settingStore().baseUrl||location.origin).href;}
 const purpose=(p?:string)=>({'first_frame':'（首帧）','last_frame':'（尾帧）','identity_reference':'（角色参考）','style_reference':'（场景／风格参考）'}[p??'']??'');
@@ -47,6 +55,7 @@ function confirmUse(report:any){const dialog=DialogPlugin.confirm({header:'确�
 defineExpose({showReference:(ref:any)=>{const issue=props.reports.flatMap(r=>r.preflight.issues).find((i:any)=>i.target?.id===ref.id&&(i.target.kind==='storyboard'?'storyboard':'assets')===ref.sources);if(issue)preview.value=issue;}});
 </script>
 <style scoped>
+.batchBlocked{margin-top:10px;padding:10px 12px;border:1px solid var(--td-error-color);border-radius:6px;background:var(--td-error-color-1);color:var(--td-text-color-primary)}.batchBlocked strong{color:var(--td-error-color)}.batchBlocked p{margin:6px 0;font-size:12px}
 .platformReviewNote{margin:6px 0 0;color:var(--td-text-color-secondary);font-size:12px}
 .checkSummary{margin-right:auto;color:var(--td-text-color-secondary);font-size:12px}.checkDetails{max-height:clamp(100px,24vh,220px);overflow-y:auto;overscroll-behavior:contain;padding-right:6px}.checkDetails:empty{display:none}
 
