@@ -17,8 +17,9 @@
       <div v-for="(issue,index) in actionable(report)" :key="index" class="issue" :class="issue.severity">
         <button v-if="issue.target?.artifactPath" type="button" class="thumb" :aria-label="'查看'+issue.target.referenceLabel" @click="preview=issue"><img :src="mediaUrl(issue.target.artifactPath)" :alt="issue.target.referenceLabel" /></button>
         <div class="body"><b>{{issue.target?.referenceLabel ?? '生成输入'}}{{purpose(issue.target?.purpose)}} · {{title(issue)}}</b>
+          <p>{{issue.message}}</p>
           <p v-if="issue.expected">镜头要求：{{issue.expected}}</p>
-          <p>{{issue.suggestion ?? issue.message}}</p>
+          <p v-if="issue.suggestion && issue.suggestion!==issue.message">处理建议：{{issue.suggestion}}</p>
           <div class="actions" v-if="issue.target"><t-button size="small" @click="preview=issue">查看对比</t-button><t-button size="small" @click="$emit('locate',issue.target,false)">定位画布</t-button><t-button v-if="issue.target.kind==='storyboard'" size="small" @click="$emit('locate',issue.target,true)">编辑图片</t-button><t-button v-if="issue.target.kind==='storyboard' && issue.target.artifactPath" size="small" @click="cropTarget={...issue.target,projectId,scriptId}">裁切局部</t-button><t-button v-if="issue.target.kind==='storyboard'" size="small" theme="primary" @click="$emit('locate',{...issue.target,regenerate:true},true)">按首帧重生成</t-button></div>
           <details><summary>详细依据</summary><p>{{issue.message}}</p><small>{{issue.code}}{{issue.target?.reviewId ? ' · 核验 '+issue.target.reviewId : ''}}</small></details>
         </div>
@@ -36,7 +37,7 @@
 </template>
 <script setup lang="ts">
 import {ref,watch,computed} from 'vue';
-import {summarizeVideoPreflight} from '@/utils/videoPreflightState';
+import {summarizeVideoPreflight,orderedVideoPreflightIssues} from '@/utils/videoPreflightState';
 import CropStoryboardFrame from './cropStoryboardFrame.vue';
 import {DialogPlugin} from 'tdesign-vue-next';
 import settingStore from '@/stores/setting';
@@ -49,7 +50,7 @@ watch(()=>props.reports,reports=>{if(reports.some(r=>!r.preflight.canSubmit))exp
 function mediaUrl(path?:string){if(!path)return '';if(/^https?:\/\//.test(path))return path;return new URL(path.startsWith('/oss/')?path:`/oss/${path.replace(/^\//,'')}`,settingStore().baseUrl||location.origin).href;}
 const purpose=(p?:string)=>({'first_frame':'（首帧）','last_frame':'（尾帧）','identity_reference':'（角色参考）','style_reference':'（场景／风格参考）'}[p??'']??'');
 const title=(i:any)=>/FRAMING|SHOT_SIZE/i.test(i.code)?'图片构图与镜头要求不一致':i.severity==='error'?'当前输入需要处理':i.severity==='warning'?'建议核对':'检查说明';
-const actionable=(r:any)=>r.preflight.issues.filter((i:any)=>i.severity!=='info');
+const actionable=(r:any)=>orderedVideoPreflightIssues<any>(r.preflight.issues);
 const canAcknowledge=(r:any)=>!r.preflight.canSubmit&&r.preflight.issues.some((i:any)=>i.severity==='error')&&r.preflight.issues.filter((i:any)=>i.severity==='error').every((i:any)=>i.overridable===true);
 function confirmUse(report:any){const dialog=DialogPlugin.confirm({header:'确认继续使用当前图片',body:'你已查看图片与镜头的构图差异，并决定保留当前版本。本次确认不启动生成，且仅适用于当前图片、提示词和参数。',confirmBtn:'确认保留此版本',onConfirm:()=>{emit('acknowledge',report);dialog.destroy();},onClose:()=>dialog.destroy()});}
 defineExpose({showReference:(ref:any)=>{const issue=props.reports.flatMap(r=>r.preflight.issues).find((i:any)=>i.target?.id===ref.id&&(i.target.kind==='storyboard'?'storyboard':'assets')===ref.sources);if(issue)preview.value=issue;}});

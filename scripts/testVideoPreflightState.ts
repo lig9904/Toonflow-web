@@ -19,3 +19,10 @@ test('all clear, all blocked, and a single blocked shot have truthful batch outc
  assert.match(summarizeVideoPreflight([row(1,false)]).message,/^视频未提交/);
  assert.deepEqual(summarizeVideoPreflight([]).ordered,[]);
 });
+
+import {orderedVideoPreflightIssues} from '../src/utils/videoPreflightState.ts';
+test('blocking reasons precede warnings within a shot; informational notes stay separate',()=>{
+ const issues=[{severity:'warning',code:'STALE'},{severity:'error',code:'MISSING_PENDANT'},{severity:'info',code:'NOTE'},{severity:'warning',code:'TAIL'}];
+ assert.deepEqual(orderedVideoPreflightIssues(issues).map(i=>i.code),['MISSING_PENDANT','STALE','TAIL']);
+ assert.equal(issues[0].code,'STALE');
+});

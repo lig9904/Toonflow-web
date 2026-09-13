@@ -11,3 +11,7 @@ export function summarizeVideoPreflight<T extends {preflight:{trackId:number;sho
  return {blocked,passed,passedIds:passed.map(r=>r.preflight.trackId),ordered:[...blocked,...passed],
   message:blocked.length ? `${reports.length>1?'批量生成未开始':'视频未提交'}：${labels.slice(0,4).join('、')}${labels.length>4?`等 ${labels.length} 个片段`:''}需要处理；本次未提交任何视频。` : ''};
 }
+
+export function orderedVideoPreflightIssues<T extends {severity:string}>(issues:readonly T[]):T[]{
+ return [...issues.filter(i=>i.severity==='error'),...issues.filter(i=>i.severity!=='error'&&i.severity!=='info')];
+}
