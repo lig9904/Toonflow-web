@@ -578,6 +578,10 @@ async function loadFailedPromptDraft(text:string) {
  if(!track||!scope||!await resolveTrackDraft(track,scope,"载入失败草稿"))return;
  if(currentTrack.value?.id!==track.id || !sameGenerateScope(scope,project.value?.id,episodesId.value,scopeSequence.value,disposed.value))return;
  currentPromptDraft.value=text;
+ await nextTick();
+ if(currentTrack.value?.id!==track.id)return;
+ document.querySelectorAll<HTMLDetailsElement>(".promptFailure details").forEach(detail=>{detail.open=false;});
+ const editor=document.querySelector<HTMLElement>(".promptInput [contenteditable=true]");editor?.focus();editor?.scrollIntoView({block:"nearest"});
  window.$message.success("已载入草稿，可修改后点击保存提示词");
 }
 
@@ -1443,4 +1447,4 @@ async function locatePreflightImage(target:any,repair:boolean){
 
 <style scoped>.promptReview{padding:8px 12px;font-size:13px;color:#56616e;max-height:180px;overflow:auto}.promptReview summary{cursor:pointer;color:#0052d9}.promptReview li{margin:6px 0}</style>
 
-<style scoped>.promptFailure{margin:8px 12px;padding:12px;border:1px solid #f0bc7b;border-radius:6px;background:var(--td-warning-color-1);font-size:13px}.promptFailure p{margin:6px 0}.promptFailure details{margin:8px 0}.promptFailure summary{cursor:pointer}.promptFailure pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;font:inherit}.promptFailure small{display:block;margin-top:8px}</style>
+<style scoped>.promptFailure{max-height:180px;overflow:auto;flex-shrink:0;margin:8px 12px;padding:12px;border:1px solid #f0bc7b;border-radius:6px;background:var(--td-warning-color-1);font-size:13px}.promptFailure p{margin:6px 0}.promptFailure details{margin:8px 0}.promptFailure summary{cursor:pointer}.promptFailure pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;font:inherit}.promptFailure small{display:block;margin-top:8px}</style>
