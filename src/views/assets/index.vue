@@ -19,6 +19,7 @@
                   </template>
                   {{ $t("workbench.assets.addPrefix") }}{{ item.name }}
                 </t-button>
+                <t-button v-if="['role','tool','scene'].includes(item.value)" variant="outline" @click="openImageUpload(item.value)">上传图片新建{{ item.name }}</t-button>
                 <t-popup placement="bottom">
                   <t-button theme="primary" v-if="assetOptions != 'clip' && assetOptions != 'audio'">
                     <template #icon>
@@ -116,6 +117,7 @@
                       </template>
                       <template #operation="{ row: subRow }">
                         <t-space :size="0">
+                          <t-button theme="primary" variant="text" :disabled="isGenerating(subRow.id)" @click="openImageUpload(subRow.type || assetOptions,subRow)">上传图片</t-button>
                           <t-button v-if="!props.selectorMode" theme="primary" variant="text" :disabled="!subRow.id" @click="openTrustedAsset(subRow)">火山素材</t-button>
                           <t-button theme="primary" variant="text" :disabled="isGenerating(subRow.id)" @click="generate(subRow)">
                             <template #icon>
@@ -191,6 +193,7 @@
                 </template>
                 <template #operation="{ row }">
                   <t-space :size="0">
+                    <t-button theme="primary" variant="text" :disabled="isGenerating(row.id)" @click="openImageUpload(row.type || assetOptions,row)">上传图片</t-button>
                     <t-button v-if="!props.selectorMode" theme="primary" variant="text" :disabled="!row.id" @click="openTrustedAsset(row)">火山素材</t-button>
                     <t-button theme="primary" variant="text" :disabled="isGenerating(row.id)" @click="generate(row)">
                       <template #icon>
@@ -387,6 +390,7 @@
       :title="tabNameMap[assetOptions]"
       :formData="formData"
       @getFilteredData="getFilteredData(assetOptions)" />
+    <uploadAssetImage v-if="imageUploadTarget" :target="imageUploadTarget" @close="imageUploadTarget=null" @saved="handleImageUploaded" />
     <generateImage v-model="generateImageShow" @update="loadCurrentTabData" :formData="currentAssetData" />
 
     <addAudioAssets v-model="addAudioShow" v-if="addAudioShow" :formData="audioFormData" @getFilteredData="getFilteredData(assetOptions)" />
@@ -442,6 +446,17 @@ import type { TabValue, TableProps } from "tdesign-vue-next";
 import addAssets from "./components/addAssets.vue";
 import addAudioAssets from "./components/addAudioAssets.vue";
 import generateImage from "./components/generateImage.vue";
+import uploadAssetImage from "./components/uploadAssetImage.vue";
+const imageUploadTarget=ref<{projectId:number;id?:number;name?:string;type:'role'|'tool'|'scene'}|null>(null);
+async function handleImageUploaded(value:{created:boolean;name:string;type:string;projectId:number}){
+ if(Number(project.value?.id)!==value.projectId)return;
+ if(value.created){assetOptions.value=value.type as typeof assetOptions.value;searchText.value=value.name;pagination.value.page=1;}
+ await loadCurrentTabData();
+}
+function openImageUpload(type:string,row?:any){
+ if(!['role','tool','scene'].includes(type)||!project.value?.id)return;
+ imageUploadTarget.value={projectId:Number(project.value.id),type:type as 'role'|'tool'|'scene',...(row?{id:Number(row.id),name:row.name}:{})};
+}
 import projectStore from "@/stores/project";
 import VolcengineTrustedAssets from "@/components/volcengineTrustedAssets.vue";
 import type { TrustedLocalTarget } from "@/components/trustedAssets/controller";
@@ -908,7 +923,7 @@ const columns: TableProps["columns"] = [
   {
     colKey: "operation",
     title: $t("workbench.assets.colOperation"),
-    width: 280,
+    width: 365,
     align: "center",
     fixed: "right",
     cell: "operation",
@@ -963,7 +978,7 @@ const subColumns: TableProps["columns"] = [
   {
     colKey: "operation",
     title: $t("workbench.assets.colOperation"),
-    width: 280,
+    width: 365,
     align: "center",
     fixed: "right",
     cell: "operation",
