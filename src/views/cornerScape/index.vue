@@ -177,6 +177,7 @@
                 :key="item.id"
                 class="historyImageItem"
                 :class="{ selected: selectedHistoryId === item.id }"
+                :aria-busy="historySelectionBusy"
                 @click.stop="toggleHistorySelect(item.id)">
                 <t-image :src="item.filePath" :style="{ width: '100px', minWidth: '100px', height: '100px' }" :lazy="true" fit="contain" />
               </div>
@@ -438,29 +439,39 @@ async function cancelGenerationFn(item: DataItem) {
 const drawerVisible = ref(false);
 const currentItem = ref<DataItem | null>(null);
 const selectedHistoryId = ref<number | null>(null);
+const historySelectionBusy = ref(false);
 
 async function toggleHistorySelect(id: number) {
-  selectedHistoryId.value = selectedHistoryId.value === id ? null : id;
-  if (!currentItem.value) return;
-  const selectedImage = currentItem.value.historyImages.find((img) => img.id === selectedHistoryId.value);
+  if (historySelectionBusy.value || !currentItem.value || Number(currentItem.value.imageId) === id) return;
+  const assetId = currentItem.value.id, projectId = Number(project.value?.id);
+  historySelectionBusy.value = true;
   try {
-    await axios.post("/assets/saveAssets", {
-      id: currentItem.value.id,
-      type: currentItem.value.type,
-      projectId: project.value?.id,
-      prompt: currentItem.value.prompt,
-      imageId: selectedImage?.id,
+    if (!(await confirmCreativeDrafts({ ids: [manual.registrationId], action: "切换素材图片" }))) return;
+    const item = currentItem.value;
+    if (!item || item.id !== assetId || Number(project.value?.id) !== projectId) return;
+    const selectedImage = item.historyImages.find((img) => Number(img.id) === id);
+    if (!selectedImage) throw new Error("这张历史图片已不可用，请重新打开素材后选择");
+    const { data } = await axios.post("/assets/saveAssets", {
+      id: assetId,
+      type: item.type,
+      projectId,
+      imageId: id,
+      expectedVersion: item.version,
+      idempotencyKey: createIdempotencyKey("corner-history-select"),
     });
-    //拿选中的图片替换当前图片
-    if (selectedImage) {
-      currentItem.value.filePath = selectedImage.filePath;
-      currentItem.value.state = "已完成";
+    if (currentItem.value?.id === assetId && Number(project.value?.id) === projectId) {
+      const patch = { imageId: Number(data.imageId), version: Number(data.version), filePath: selectedImage.filePath, state: "已完成" };
+      Object.assign(currentItem.value, patch);
+      const row = dataList.value.find((row) => row.id === assetId);
+      if (row) Object.assign(row, patch);
+      selectedHistoryId.value = Number(data.imageId);
+      window.$message.success($t("workbench.cornerScape.msg.replaceSuccess"));
     }
-    getFilteredData();
-    window.$message.success($t("workbench.cornerScape.msg.replaceSuccess"));
-  } catch (e) {
-    window.$message.error($t("workbench.cornerScape.msg.replaceFailed"));
-    return;
+  } catch (e: any) {
+    const message = e?.code === "VERSION_CONFLICT" ? "素材已被更新，本次未切换图片。请重新打开素材后再选择。" : e?.message || $t("workbench.cornerScape.msg.replaceFailed");
+    window.$message.error(message);
+  } finally {
+    historySelectionBusy.value = false;
   }
 }
 
@@ -487,7 +498,7 @@ watch(()=>[currentItem.value?.prompt,currentItem.value?.version],()=>{if(current
 async function openDrawer(item: DataItem) {
   if(!(await manual.close()))return;
   if (item.state == "生成中") return;
-  selectedHistoryId.value = null;
+  selectedHistoryId.value = Number(item.imageId) || null;
   // 先用当前数据打开抽屉
   editForm.assetsId = item.id;
   editForm.name = item.name || "";
@@ -516,6 +527,7 @@ async function openDrawer(item: DataItem) {
       if (idx !== -1) dataList.value[idx] = freshItem;
       // 更新当前抽屉项
       currentItem.value = freshItem;
+      selectedHistoryId.value = Number(freshItem.imageId) || null;
       editForm.prompt = freshItem.prompt || editForm.prompt;
       editForm.resolution = freshItem.resolution || editForm.resolution;
       editForm.relepedAudio = [...freshItem.relepedAudio];
