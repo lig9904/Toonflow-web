@@ -1,7 +1,8 @@
 <template>
   <t-dialog v-model:visible="visible" :header="target.id ? `上传图片 · ${target.name}` : `上传图片新建${typeName}`" width="640px" :mask-closable="false" :close-on-esc-keydown="false" :confirm-btn="{content:'上传并使用',loading:saving,disabled:reading||saving||!draft.base64}" :cancel-btn="{content:'取消',disabled:saving}" :close-btn="!saving" @confirm="confirm" @cancel="close" @close-btn-click="close">
     <p>{{ target.id ? '确认后将使用新图片，旧图片保留在历史版本中；资产设定和提示词保持不变。' : '直接上传已有图片，不需要调用模型。名称必填，设定和提示词可以稍后补充。' }}</p>
-    <input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp" :disabled="reading||saving" @change="chooseFile" />
+    <input ref="fileInput" hidden type="file" accept="image/png,image/jpeg,image/webp" :disabled="reading||saving" @change="chooseFile" />
+    <div class="fileChoice"><t-button variant="outline" :disabled="reading||saving" @click="fileInput?.click()">{{ reading ? '读取图片中…' : draft.base64 ? '重新选择图片' : '选择图片' }}</t-button><span>{{ draft.fileName || '尚未选择图片' }}</span></div>
     <p class="hint">支持 PNG、JPEG、WebP，图片保存到本地媒体存储。</p>
     <img v-if="draft.base64" :src="draft.base64" :alt="draft.fileName" class="preview" />
     <t-form v-if="!target.id" :data="draft" label-align="top">
@@ -56,5 +57,5 @@ async function chooseFile(event:Event){
 }
 </script>
 <style scoped>
-.preview{display:block;max-width:100%;width:auto;max-height:240px;object-fit:contain;margin:12px auto}.hint{font-size:12px;color:var(--td-text-color-secondary)}.error{color:var(--td-error-color)}
+.fileChoice{display:flex;align-items:center;gap:12px}.fileChoice span{overflow-wrap:anywhere;min-width:0}.preview{display:block;max-width:100%;width:auto;max-height:240px;object-fit:contain;margin:12px auto}.hint{font-size:12px;color:var(--td-text-color-secondary)}.error{color:var(--td-error-color)}
 </style>
